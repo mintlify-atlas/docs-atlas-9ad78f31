@@ -1,0 +1,93 @@
+---
+title: "Reporting security vulnerabilities in zEnv"
+description: "How to report a vulnerability responsibly: where to send reports, what to include, response timelines, scope, and recognition policy for zEnv."
+---
+
+zEnv's security model depends on responsible disclosure. If you find a vulnerability — particularly one that could expose plaintext secrets, break the zero-knowledge invariant, or compromise authentication — we need to know before it is public. This page explains how to report, what to include, and what to expect in return.
+
+<Warning>
+  Do not open a public GitHub issue for security vulnerabilities. Public disclosure before a fix is in place puts every zEnv user at risk.
+</Warning>
+
+## How to report
+
+Email **security@zenv.sh** with the details described below. All reports are read and triaged by the core team. If you do not receive an acknowledgment within 48 hours, send a follow-up to the same address.
+
+<Steps>
+  <Step title="Write a clear description">
+    Describe the vulnerability: what it is, which component it affects, and what an attacker could do with it. Be specific — vague reports are harder to triage and may delay response.
+  </Step>
+  <Step title="Include reproduction steps">
+    Provide the minimum steps required to reproduce the issue. If it requires a specific configuration, include that. If you have a proof-of-concept, attach it to the email.
+  </Step>
+  <Step title="Assess the impact">
+    Describe what an attacker gains by exploiting the vulnerability. Does it expose plaintext secrets? Bypass authentication? Allow privilege escalation? Your impact assessment helps us prioritise correctly.
+  </Step>
+  <Step title="Suggest a fix (if you have one)">
+    If you have identified a potential fix or mitigation, include it. This is optional, but a concrete suggestion can significantly accelerate resolution.
+  </Step>
+  <Step title="Send to security@zenv.sh">
+    Email all of the above to **security@zenv.sh**. If you need to transmit sensitive proof-of-concept code, request a PGP key in your initial message.
+  </Step>
+</Steps>
+
+## Response timeline
+
+| Milestone | Target |
+|---|---|
+| Acknowledgment | Within 48 hours of receipt |
+| Initial assessment | Within 5 business days |
+| Fix and release | Within 30 days (severity-dependent) |
+
+For critical vulnerabilities — particularly those that break the zero-knowledge invariant — we will prioritise an accelerated fix timeline. We will keep you informed of progress throughout.
+
+## Scope
+
+The following components are in scope for security reports:
+
+<CardGroup cols={2}>
+  <Card title="Amnesia (Go)" icon="code">
+    The core cryptographic engine in `amnesia/`. Covers key derivation (`DeriveKeys`), symmetric encryption (`Encrypt`, `Decrypt`, `WrapKey`, `UnwrapKey`), name hashing (`HashName`, `HashAuthKey`), and asymmetric operations (`GenerateKeypair`, `WrapWithPublicKey`, `UnwrapWithPrivateKey`).
+  </Card>
+  <Card title="Amnesia (TypeScript)" icon="code">
+    The `@zenv/amnesia` package in `packages/amnesia/`. Must produce byte-identical output to Go Amnesia. Cross-language parity failures that would cause silent decryption mismatches are in scope.
+  </Card>
+  <Card title="API server" icon="server">
+    The Go HTTP API in `api/`. Any vulnerability that causes the API to decrypt user data, leak ciphertext to unauthorised parties, or bypass access controls is in scope.
+  </Card>
+  <Card title="Auth server" icon="shield">
+    The TypeScript identity layer in `apps/auth/`. Covers authentication bypass, session fixation, token leakage, and any weakness in how Auth Key hashes are verified.
+  </Card>
+  <Card title="CLI" icon="terminal">
+    The `zenv` CLI in `cli/`. Covers how it handles `ZENV_TOKEN`, `ZENV_PROJECT_KEY`, and plaintext secrets in memory, process arguments, or temporary files.
+  </Card>
+  <Card title="SDK and dashboard" icon="layout-dashboard">
+    `@zenv/sdk` in `packages/sdk/` and the TanStack Start dashboard in `apps/web/`. Includes the browser ban enforcement, schema validation, and any surface that could expose credentials to client-side JavaScript.
+  </Card>
+</CardGroup>
+
+## The zero-knowledge invariant
+
+zEnv's core security property is that the server never has access to plaintext secrets. Any vulnerability that breaks this invariant is treated as **critical severity**.
+
+The following must never leave the client under any circumstances:
+
+- **Vault Key** — the user's PIN or passphrase; the root of the key hierarchy
+- **KEK** — bytes 0–31 of the Argon2id output; used only to wrap and unwrap the DEK
+- **DEK** — the Data Encryption Key; used only to encrypt and decrypt individual vault items
+- **Plaintext secret values** — the decrypted content of any vault item
+- **Plaintext secret names** — names are HMAC-hashed before leaving the client
+
+If you find a code path — in any component — that causes any of these to be transmitted to the server, logged server-side, or exposed through an API response, report it immediately as a critical vulnerability.
+
+<Note>
+  The Auth Key (bytes 32–63 of the Argon2id output) is transmitted to the server, but only as an Argon2id hash computed by `HashAuthKey`. The raw Auth Key must never be transmitted. A vulnerability that sends the raw Auth Key to the server is critical severity, because it would allow the server to compute the KEK and unwrap the DEK.
+</Note>
+
+## Recognition
+
+We will credit researchers in our security advisories. If you prefer to remain anonymous, tell us in your report and we will honour that preference. We do not currently offer a monetary bug bounty, but we are committed to public acknowledgment for all confirmed vulnerabilities.
+
+<Info>
+  zEnv has not yet undergone a third-party security audit. We actively encourage security researchers to examine the Amnesia engine — it is MIT-licensed, dependency-minimal, and designed to be independently auditable. The entire cryptographic story lives in `amnesia/` with no external state.
+</Info>

@@ -1,0 +1,245 @@
+---
+title: "Auth endpoints: vault setup, unlock, and session state"
+description: "Reference for the zEnv auth endpoints — setup-vault, unlock, lock, me, and change-vault-key — covering the full cryptographic onboarding and session lifecycle."
+---
+
+The auth endpoints handle the two-layer authentication model used by the zEnv dashboard. Identity (who you are) is verified through a session established by the identity provider. Vault access (proving you hold the Vault Key) is a separate step that happens after identity is confirmed.
+
+<Info>
+OAuth-based login is not yet implemented. The current `POST /v1/auth/login` endpoint is a temporary development-only path that authenticates by email. It will be replaced by OAuth in a future release.
+</Info>
+
+All crypto material (salt, wrapped DEK, key hashes, keypairs) is generated client-side using the Amnesia engine. The server stores only opaque bytes and never participates in key derivation or decryption.
+
+---
+
+## POST /v1/auth/setup-vault — vault setup
+
+Store client-generated crypto material and link a zEnv vault to the authenticated identity. This endpoint is called once per user, immediately after their first sign-in, when they choose a Vault Key (PIN or passphrase).
+
+After this call succeeds, the vault is automatically marked as unlocked for the current session — the user does not need to separately call the unlock endpoint after setup.
+
+**Auth:** session (identity layer only — no vault required)
+
+### Request body
+
+<ParamField body="vault_key_type" type="string" required>
+  The type of Vault Key the user chose: `pin` or `passphrase`. This determines which Argon2id parameter set was used during key derivation and is stored so the SDK can use the same parameters on subsequent unlocks.
+</ParamField>
+
+<ParamField body="salt" type="string" required>
+  Base64-encoded 32-byte salt generated client-side with `amnesia.GenerateSalt()`. Used as input to Argon2id during key derivation.
+</ParamField>
+
+<ParamField body="auth_key_hash" type="string" required>
+  Base64-encoded hash of the Auth Key derived from the Vault Key. Computed as `amnesia.HashAuthKey(authKey)`. Stored for future vault unlock verification. The server never sees the raw Auth Key or Vault Key.
+</ParamField>
+
+<ParamField body="wrapped_dek" type="string" required>
+  Base64-encoded user DEK wrapped (encrypted) with the user KEK using AES-256-GCM. The DEK is generated client-side; the KEK is derived from the Vault Key via Argon2id. The server returns this blob during unlock so the client can unwrap the DEK.
+</ParamField>
+
+<ParamField body="public_key" type="string" required>
+  Base64-encoded X25519 public key generated client-side with `amnesia.GenerateKeypair()`. Used by other users to encrypt the Project Vault Key for this user when granting project access.
+</ParamField>
+
+<ParamField body="wrapped_private_key" type="string" required>
+  Base64-encoded X25519 private key encrypted with the user DEK. Returned during unlock so the client can decrypt project vault key grants.
+</ParamField>
+
+<ParamField body="recovery_wrapped_dek" type="string">
+  Optional. Base64-encoded DEK encrypted with a recovery key derived from recovery words. Enables account recovery without a trusted contact.
+</ParamField>
+
+<ParamField body="recovery_disabled" type="boolean">
+  Optional (enterprise). Set to `true` to disable all recovery mechanisms for this account.
+</ParamField>
+
+### Response `201 Created`
+
+<ResponseField name="user_id" type="string">
+  UUID of the newly created zEnv user record.
+</ResponseField>
+
+<ResponseField name="vault_setup_complete" type="boolean">
+  Always `true` on success.
+</ResponseField>
+
+Returns `409 Conflict` if a vault is already set up for this identity.
+
+---
+
+## POST /v1/auth/unlock — vault unlock
+
+Verify the user's Vault Key (via Auth Key hash) and return the wrapped DEK and keypair. The client uses these to derive the user KEK, unwrap the DEK, and decrypt the private key, gaining access to all project vault keys it has been granted.
+
+On success, the vault unlock state is recorded in Redis with a 24-hour TTL. Endpoints requiring `session + vault` will accept the session without further Vault Key prompts until the TTL expires or the vault is explicitly locked.
+
+**Auth:** session (identity layer)
+
+### Request body
+
+<ParamField body="auth_key_hash" type="string" required>
+  Base64-encoded hash of the Auth Key computed from the Vault Key: `amnesia.HashAuthKey(authKey)`. The server compares this against the stored hash using constant-time comparison.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="wrapped_dek" type="string">
+  Base64-encoded wrapped user DEK. The client unwraps this with the user KEK (derived from the Vault Key) to recover the raw DEK.
+</ResponseField>
+
+<ResponseField name="wrapped_private_key" type="string">
+  Base64-encoded private key encrypted with the user DEK. The client decrypts this after unwrapping the DEK.
+</ResponseField>
+
+<ResponseField name="public_key" type="string">
+  Base64-encoded user public key (X25519), echoed for convenience.
+</ResponseField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.zenv.sh/v1/auth/unlock \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=..." \
+  -d '{
+    "auth_key_hash": "base64encodedAuthKeyHash=="
+  }'
+```
+
+```json response
+{
+  "wrapped_dek": "base64encodedWrappedDEK==",
+  "wrapped_private_key": "base64encodedWrappedPrivateKey==",
+  "public_key": "base64encodedPublicKey=="
+}
+```
+
+</CodeGroup>
+
+Returns `403 Forbidden` with `{"error": "wrong Vault Key"}` if the submitted hash does not match.
+
+---
+
+## POST /v1/auth/lock — lock vault
+
+Remove the vault unlock record for the current session, requiring the user to re-enter their Vault Key on the next operation that requires vault access.
+
+**Auth:** session (no vault required — you can lock without being unlocked)
+
+### Response `204 No Content`
+
+No body. Always succeeds, even if the vault was already locked.
+
+```bash
+curl -X POST https://api.zenv.sh/v1/auth/lock \
+  -H "Cookie: session_id=..."
+```
+
+---
+
+## GET /v1/auth/me — auth state
+
+Return the current user's identity, vault setup status, and vault lock state. Useful for the dashboard to decide whether to show the vault setup flow, the unlock prompt, or the main UI.
+
+**Auth:** session (identity layer only)
+
+### Response `200 OK`
+
+<ResponseField name="email" type="string">
+  Email address from the identity provider.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Display name from the identity provider. May be empty if the provider did not supply one.
+</ResponseField>
+
+<ResponseField name="vault_setup_complete" type="boolean">
+  `true` if a zEnv vault has been set up for this identity (i.e., `POST /v1/auth/setup-vault` has been called).
+</ResponseField>
+
+<ResponseField name="vault_key_type" type="string">
+  `pin` or `passphrase`. Present only if `vault_setup_complete` is `true`.
+</ResponseField>
+
+<ResponseField name="salt" type="string">
+  Base64-encoded user salt. Present only if `vault_setup_complete` is `true`. The client needs this to derive the KEK from the Vault Key via Argon2id.
+</ResponseField>
+
+<ResponseField name="vault_unlocked" type="boolean">
+  `true` if the vault unlock state is set in Redis for this session (i.e., the user has recently verified their Vault Key).
+</ResponseField>
+
+<CodeGroup>
+
+```bash curl
+curl https://api.zenv.sh/v1/auth/me \
+  -H "Cookie: session_id=..."
+```
+
+```json response — vault set up and unlocked
+{
+  "email": "alice@example.com",
+  "name": "Alice",
+  "vault_setup_complete": true,
+  "vault_key_type": "passphrase",
+  "salt": "base64encodedSalt==",
+  "vault_unlocked": true
+}
+```
+
+```json response — first login, vault not yet set up
+{
+  "email": "alice@example.com",
+  "name": "Alice",
+  "vault_setup_complete": false,
+  "vault_unlocked": false
+}
+```
+
+</CodeGroup>
+
+---
+
+## PUT /v1/auth/change-vault-key — rotate vault key
+
+Change the Vault Key (PIN or passphrase) without touching any secret rows. This is an O(1) operation — only the user row is updated.
+
+The client derives the old KEK from the current Vault Key, unwraps the DEK, derives a new KEK from the new Vault Key, re-wraps the same DEK, re-encrypts the private key with the re-wrapped DEK, and sends the new crypto material. The DEK itself does not change, so no secret re-encryption is needed.
+
+**Auth:** session + vault unlocked
+
+### Request body
+
+<ParamField body="current_auth_key_hash" type="string" required>
+  Base64-encoded raw Auth Key (bytes 32–63 of the Argon2id output). The server calls `HashAuthKey()` on this value internally and compares the result against the stored hash.
+</ParamField>
+
+<ParamField body="new_vault_key_type" type="string" required>
+  New vault key type: `pin` or `passphrase`.
+</ParamField>
+
+<ParamField body="new_salt" type="string" required>
+  Base64-encoded freshly generated 32-byte salt.
+</ParamField>
+
+<ParamField body="new_auth_key_hash" type="string" required>
+  Base64-encoded hash of the Auth Key derived from the new Vault Key.
+</ParamField>
+
+<ParamField body="new_wrapped_dek" type="string" required>
+  Base64-encoded DEK re-wrapped with the new KEK (derived from the new Vault Key and new salt).
+</ParamField>
+
+<ParamField body="new_wrapped_private_key" type="string" required>
+  Base64-encoded private key re-encrypted with the unwrapped DEK.
+</ParamField>
+
+### Response `200 OK`
+
+```json
+{ "status": "vault key changed" }
+```
+
+Returns `403 Forbidden` if `current_auth_key_hash` does not match the stored hash.

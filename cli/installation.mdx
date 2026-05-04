@@ -1,0 +1,112 @@
+---
+title: 'Install the zenv CLI'
+description: 'Build the zenv CLI from source using the Go toolchain. Produces a single static binary that embeds the Amnesia crypto engine with no runtime dependencies.'
+---
+
+The zenv CLI is a single static binary written in Go. It has no runtime dependencies and links the [Amnesia](https://github.com/Judeadeniji/zenv-sh/tree/main/amnesia) crypto engine natively — no WASM, no shelling out. The only requirement to build it is a working Go toolchain.
+
+## Prerequisites
+
+You need Go 1.21 or later. Check your version:
+
+```bash
+go version
+```
+
+If Go is not installed, follow the [official Go installation instructions](https://go.dev/doc/install).
+
+## Build from source
+
+Clone the repository, then choose one of the build methods below.
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/Judeadeniji/zenv-sh.git
+    cd zenv-sh
+    ```
+  </Step>
+
+  <Step title="Build the binary">
+    <Tabs>
+      <Tab title="CLI only">
+        Build just the CLI binary. The output is placed at `./bin/zenv`.
+
+        ```bash
+        make build-cli
+        ```
+
+        This runs:
+
+        ```bash
+        go build -o ./bin/zenv ./cli/cmd/zenv
+        ```
+      </Tab>
+      <Tab title="Everything">
+        Build both the API server and the CLI in one step.
+
+        ```bash
+        make build
+        ```
+
+        This produces `./bin/zenv-api` and `./bin/zenv`.
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Verify the binary">
+    Run the help flag to confirm the binary is working:
+
+    ```bash
+    ./bin/zenv --help
+    ```
+
+    You should see the top-level usage output listing all available command groups.
+  </Step>
+
+  <Step title="(Optional) Move to your PATH">
+    To use `zenv` from anywhere without the `./bin/` prefix, copy the binary to a directory in your `PATH`:
+
+    ```bash
+    sudo mv ./bin/zenv /usr/local/bin/zenv
+    ```
+  </Step>
+</Steps>
+
+## Run without building
+
+During development or in CI environments where you do not want a persistent binary, you can invoke the CLI directly through `go run`:
+
+```bash
+go run ./cli/cmd/zenv -- secrets list
+```
+
+<Note>
+The `--` separator is required when using `go run` to prevent Go from parsing your command arguments as build flags.
+</Note>
+
+## Future distribution
+
+Packaged distribution channels are planned and not yet available. When released, installation will also be possible via:
+
+<CardGroup cols={3}>
+  <Card title="curl installer" icon="terminal">
+    ```bash
+    curl -fsSL https://zenv.sh/install | bash
+    ```
+  </Card>
+  <Card title="npx" icon="npm">
+    ```bash
+    npx zenv
+    ```
+  </Card>
+  <Card title="Homebrew" icon="beer-mug">
+    ```bash
+    brew install zenv
+    ```
+  </Card>
+</CardGroup>
+
+<Info>
+These distribution channels are listed in the project roadmap. Until they are released, building from source is the only supported installation method.
+</Info>

@@ -1,0 +1,163 @@
+---
+title: "Run zEnv with Docker Compose"
+description: "Start Postgres and Redis with Make, apply migrations, build the Go binaries, and launch the zEnv API server for local development."
+---
+
+The development workflow uses a single `docker-compose.yml` to start infrastructure (Postgres and Redis), and a `Makefile` to build and run the Go binaries on the host. There is no all-in-one `docker compose up` for local development — the API server runs as a normal process so you can iterate quickly without rebuilding images.
+
+<Note>
+  These instructions set up a **local development environment**. Production deployment via `docker-compose.prod.yml` is not yet complete. See the [overview](/self-hosting/overview) for current project status.
+</Note>
+
+## Prerequisites
+
+- Docker and Docker Compose v2
+- Go 1.24 or later
+- `make`
+
+## Local setup
+
+<Steps>
+  <Step title="Start Postgres and Redis">
+    Run `make dev-up` from the repository root. This starts both infrastructure services defined in `docker-compose.yml` as detached containers.
+
+    ```bash
+    make dev-up
+    ```
+
+    Postgres is exposed on host port `5434` (not `5432`) to avoid conflicts with any local Postgres installation. Redis is on `6379`.
+  </Step>
+
+  <Step title="Run database migrations">
+    Apply the SQL schema using `golang-migrate`. The `DATABASE_URL` defaults to the dev credentials from the Makefile.
+
+    ```bash
+    make migrate
+    ```
+
+    To override the database URL:
+
+    ```bash
+    DATABASE_URL="postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable" make migrate
+    ```
+  </Step>
+
+  <Step title="Build the binaries">
+    Compile both the API server and the CLI tool into `./bin/`:
+
+    ```bash
+    make build
+    ```
+
+    This produces `./bin/zenv-api` and `./bin/zenv`.
+  </Step>
+
+  <Step title="Start the API server">
+    Run the compiled binary with the required environment variables:
+
+    ```bash
+    DATABASE_URL="postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable" \
+    REDIS_URL="redis://localhost:6379" \
+    ./bin/zenv-api
+    ```
+
+    The server listens on port `8080` by default. You can override this with `PORT=<number>`.
+
+    For verbose request logging, add `VERBOSE=true`.
+  </Step>
+</Steps>
+
+## Docker Compose services
+
+The `docker-compose.yml` defines two services:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: zenv
+      POSTGRES_PASSWORD: zenv_dev
+      POSTGRES_DB: zenv
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zenv"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+```
+
+Both services define health checks so that dependent processes can wait for readiness before connecting.
+
+## Stopping and cleaning up
+
+```bash
+make dev-down
+```
+
+This runs `docker compose down -v`, which stops the containers and removes the named volumes. All data is discarded.
+
+## Production Compose file
+
+`docker-compose.prod.yml` adds the full application stack — API server, auth server, web dashboard, and a Caddy reverse proxy with automatic TLS. It is **not yet complete** and is included here for reference only.
+
+Key differences from the dev file:
+
+- Postgres and Redis are placed behind a `local` profile. In a real production deployment, you supply `DATABASE_URL` and `REDIS_URL` pointing at managed services (e.g., Neon, Upstash) and omit the `--profile local` flag entirely.
+- Redis requires a password (`REDIS_PASSWORD`) and `redis-server --requirepass` is passed as the container command.
+- Migration init containers (`migrate-api`, `migrate-auth`) run once and exit before the application services start.
+- The `api` service is built from `api/Dockerfile` using a multi-stage Go build on `golang:1.26-alpine`, producing a minimal `alpine:3.21` runtime image.
+- The `auth` and `web` services are built from `Dockerfile.node` using a multi-stage Node.js 22 build with pnpm.
+- Caddy listens on ports `80`, `443`, and `443/udp` and routes traffic via `APP_DOMAIN`, `AUTH_DOMAIN`, and `API_DOMAIN` environment variables.
+
+<Warning>
+  Do not use `docker-compose.prod.yml` for real workloads. OAuth is not wired, there has been no security audit, and the deployment flow is unfinished.
+</Warning>
+
+## API Dockerfile
+
+The `api/Dockerfile` uses a two-stage build:
+
+```dockerfile
+FROM golang:1.26-alpine AS builder
+# ...builds the Go workspace, produces /zenv-api binary
+
+FROM alpine:3.21
+COPY --from=builder /zenv-api /usr/local/bin/zenv-api
+COPY api/migrations /migrations
+EXPOSE 8080
+ENTRYPOINT ["zenv-api"]
+```
+
+The final image contains only the static binary, CA certificates, timezone data, and the migration files.
+
+## Verifying the setup
+
+Once the API server is running, confirm it is healthy:
+
+```bash
+curl http://localhost:8080/v1/auth/login
+# → 400 or 422 (route exists, missing body — server is up)
+```
+
+To run the full smoke test suite (requires the API to be running with Postgres and Redis):
+
+```bash
+make smoke
+```

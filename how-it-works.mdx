@@ -1,0 +1,244 @@
+---
+title: "How zEnv's zero-knowledge encryption works"
+description: "A walkthrough of the full cryptographic flow: how the Vault Key becomes a KEK, how the DEK is wrapped, and what the server can and cannot see."
+---
+
+zEnv's zero-knowledge property is not a policy claim — it is a cryptographic constraint. The server receives only ciphertext produced by keys it never holds. This page explains the full key hierarchy, the unlock flow, and how the Go and TypeScript implementations stay byte-identical across languages.
+
+## Key hierarchy
+
+Every piece of encrypted data in zEnv traces back to a single source: the Vault Key. This is something you know — a PIN or passphrase — that never leaves your machine.
+
+```
+Vault Key (user's memory — PIN or passphrase)
+  │
+  ▼ Argon2id — ONE run, 64-byte output
+  ┌──────────────────────────────────┐
+  │ bytes 0-31        bytes 32-63    │
+  │ KEK               Auth Key       │
+  │ (wraps DEK)       (server verify)│
+  └──────────────────────────────────┘
+        │
+        ▼ AES-256-GCM unwrap
+      DEK (Data Encryption Key)
+        │
+        ▼ AES-256-GCM per item
+      Encrypted vault items (one per DB row)
+```
+
+**Argon2id runs exactly once per unlock.** The 64-byte output is split by convention: bytes 0–31 form the Key Encryption Key (KEK), bytes 32–63 form the Auth Key. The KEK unwraps the DEK. The Auth Key is hashed again with Argon2id and stored server-side so the API can verify you know the Vault Key without learning it.
+
+## What the server stores vs. what stays client-side
+
+| Data | Location | Can server read it? |
+| --- | --- | --- |
+| Vault Key | Client only — never transmitted | N/A |
+| KEK | Derived client-side per unlock, never stored | No |
+| Auth Key | Hash stored server-side | No — only the hash |
+| Wrapped DEK | Server (PostgreSQL) | No — needs KEK to unwrap |
+| Secret ciphertext | Server (PostgreSQL) | No — needs DEK to decrypt |
+| Secret plaintext | Client only — never stored | No |
+| Secret name | Never stored plaintext — stored as HMAC-SHA256 hash | No |
+
+Secret names are hashed with HMAC-SHA256 using a key derived from the DEK. This lets the server look up secrets by name without learning what the names are.
+
+## The unlock flow
+
+<Steps>
+  <Step title="Fetch project crypto material">
+    The CLI or SDK calls `GET /v1/sdk/projects/{id}/crypto`. The API returns the project salt and the wrapped DEK — two values it cannot use on its own.
+
+    ```
+    ZENV_PROJECT_KEY
+      → API: GET /sdk/projects/{id}/crypto → project_salt + wrapped_dek
+    ```
+  </Step>
+
+  <Step title="Derive the KEK with Argon2id">
+    Argon2id is run once on the client, combining the Vault Key with the project salt to produce a 64-byte output. The first 32 bytes are the KEK.
+
+    <CodeGroup>
+
+    ```go Go (Amnesia)
+    import "github.com/Judeadeniji/zenv-sh/amnesia"
+
+    salt := amnesia.GenerateSalt()
+    kek, authKey := amnesia.DeriveKeys("my-passphrase", salt, amnesia.KeyTypePassphrase)
+    ```
+
+    ```typescript TypeScript (@zenv/amnesia)
+    import { deriveKeys, generateSalt } from "@zenv/amnesia";
+
+    const salt = generateSalt();
+    const { kek, authKey } = await deriveKeys("my-passphrase", salt, "passphrase");
+    ```
+
+    </CodeGroup>
+
+    The Auth Key is hashed with Argon2id again before being sent to the server for verification. The raw Auth Key never leaves the client.
+  </Step>
+
+  <Step title="Unwrap the DEK">
+    The KEK is used to unwrap the wrapped DEK via AES-256-GCM. The DEK is now available in memory on the client.
+
+    <CodeGroup>
+
+    ```go Go (Amnesia)
+    dek, err := amnesia.UnwrapKey(wrappedDEK, nonce, kek)
+    ```
+
+    ```typescript TypeScript (@zenv/amnesia)
+    import { unwrapKey } from "@zenv/amnesia";
+
+    const dek = await unwrapKey(wrappedDEK, nonce, kek);
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Encrypt or decrypt secrets with the DEK">
+    Each secret is encrypted or decrypted individually with AES-256-GCM using the DEK. A fresh 96-bit random nonce is generated for every encryption call.
+
+    <CodeGroup>
+
+    ```go Go (Amnesia)
+    // Encrypt
+    plaintext := []byte(`secret-value`)
+    ciphertext, nonce, err := amnesia.Encrypt(plaintext, dek)
+
+    // Decrypt
+    decrypted, err := amnesia.Decrypt(ciphertext, nonce, dek)
+    ```
+
+    ```typescript TypeScript (@zenv/amnesia)
+    import { encrypt, decrypt } from "@zenv/amnesia";
+
+    // Encrypt
+    const plaintext = new TextEncoder().encode("secret-value");
+    const { ciphertext, nonce } = await encrypt(plaintext, dek);
+
+    // Decrypt
+    const decrypted = await decrypt(ciphertext, nonce, dek);
+    // new TextDecoder().decode(decrypted) === "secret-value"
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Hash secret names for server-side lookup">
+    Secret names are never stored in plaintext. The CLI and SDK hash names with HMAC-SHA256 before sending them to the server. This lets the API index and retrieve secrets without knowing what they are called.
+
+    <CodeGroup>
+
+    ```go Go (Amnesia)
+    nameHash := amnesia.HashName("DATABASE_URL", hmacKey)
+    ```
+
+    ```typescript TypeScript (@zenv/amnesia)
+    import { hashName } from "@zenv/amnesia";
+
+    const nameHash = await hashName("DATABASE_URL", hmacKey);
+    ```
+
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## The Amnesia engine
+
+Amnesia is the pure cryptographic library that powers both the Go CLI and the TypeScript SDK. It has no concept of users, projects, or environments — it takes bytes in and gives bytes out.
+
+**Go Amnesia** is the reference implementation. Its only external dependency is `golang.org/x/crypto`. It can be audited independently of the rest of the codebase.
+
+**TypeScript Amnesia** (`@zenv/amnesia`) reimplements the same operations using Web Crypto API, hash-wasm (for Argon2id), and tweetnacl (for X25519 NaCl box). It must produce byte-identical output to the Go implementation.
+
+<Note>
+  Cross-language parity matters because a secret encrypted by the CLI (Go) must be decryptable by the SDK (TypeScript), and vice versa. Both implementations are tested against the same shared JSON test vectors in CI — any drift in output fails the build immediately.
+</Note>
+
+### Full Go Amnesia API
+
+```go
+// Key derivation — one Argon2id run, 64-byte output
+// bytes 0-31 → KEK, bytes 32-63 → Auth Key
+DeriveKeys(vaultKey string, salt []byte, keyType KeyType) (kek, authKey []byte)
+
+// Symmetric encryption (AES-256-GCM, 96-bit random nonce per call)
+Encrypt(plaintext, key []byte) (ciphertext, nonce []byte, err error)
+Decrypt(ciphertext, nonce, key []byte) (plaintext []byte, err error)
+
+// Key wrapping (semantically identical to Encrypt/Decrypt)
+WrapKey(dek, kek []byte) (ciphertext, nonce []byte, err error)
+UnwrapKey(ciphertext, nonce, kek []byte) (dek []byte, err error)
+
+// Name hashing for indexed server-side lookup without revealing names
+HashName(name string, hmacKey []byte) []byte
+
+// Auth Key hashing (Argon2id) before server storage
+HashAuthKey(authKey []byte) []byte
+
+// Asymmetric encryption (X25519 + NaCl box)
+GenerateKeypair() (publicKey, privateKey []byte, err error)
+WrapWithPublicKey(payload, publicKey []byte) ([]byte, error)
+UnwrapWithPrivateKey(ciphertext, privateKey []byte) ([]byte, error)
+
+// Secure random generation
+GenerateSalt() []byte   // 32 bytes
+GenerateNonce() []byte  // 12 bytes
+GenerateKey() []byte    // 32 bytes
+```
+
+## CLI flow vs. SDK flow
+
+Both flows follow the same cryptographic path, but differ in how credentials are provided and which binary executes the crypto.
+
+<Tabs>
+  <Tab title="CLI flow">
+    The Go CLI reads `ZENV_TOKEN` and `ZENV_PROJECT_KEY` from environment variables (or a `.zenv` file), calls the API to fetch the project salt and wrapped DEK, runs Argon2id locally via Go Amnesia, unwraps the DEK, and then encrypts or decrypts secrets in memory.
+
+    ```bash
+    export ZENV_TOKEN=ze_...
+    export ZENV_PROJECT_KEY=...
+    export ZENV_PROJECT=<project-id>
+    export ZENV_ENV=development
+
+    ./bin/zenv secrets set API_KEY "sk-live-..."
+    ./bin/zenv secrets get API_KEY
+    ```
+
+    For process injection, the CLI decrypts all secrets and passes them as environment variables to the child process — they are never written to disk.
+
+    ```bash
+    ./bin/zenv run -- node server.js
+    ```
+  </Tab>
+  <Tab title="SDK flow">
+    The TypeScript SDK reads credentials from environment variables, calls `GET /v1/sdk/projects/{id}/crypto` to fetch the project salt and wrapped DEK, runs Argon2id via `@zenv/amnesia`, unwraps the DEK, decrypts each secret, and then validates the values against your schema.
+
+    ```typescript
+    import { zenv } from "@zenv/sdk";
+    import { z } from "zod";
+
+    const vault = zenv({
+      token: process.env.ZENV_TOKEN!,
+      projectKey: process.env.ZENV_PROJECT_KEY!,
+      projectId: process.env.ZENV_PROJECT_ID!,
+      environment: process.env.NODE_ENV,
+      schema: z.object({
+        DATABASE_URL: z.string().url(),
+        PORT: z.string().transform(Number),
+      }),
+    });
+
+    const secrets = await vault.load();
+    ```
+
+    The schema serves two purposes: it defines which secrets to fetch (as a manifest) and it validates and transforms the decrypted values. Fetching a key not in the schema throws in strict mode (the default).
+  </Tab>
+</Tabs>
+
+## Purity guarantee
+
+The Amnesia package enforces a strict purity rule: it must never make HTTP requests, read from or write to the filesystem, or import anything from the API, CLI, or SDK packages. This means the entire cryptographic story — from Vault Key to ciphertext — is contained in a single package with a minimal dependency surface.
+
+A security firm auditing zEnv's zero-knowledge claims reads Amnesia and can verify the full cryptographic model without touching the rest of the codebase.

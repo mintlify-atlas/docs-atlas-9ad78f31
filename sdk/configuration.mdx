@@ -1,0 +1,116 @@
+---
+title: "Configure @zenv/sdk vault options"
+description: "Full reference for ZEnvConfig — tokens, project credentials, environment targeting, schema, strict mode, and self-hosted base URLs."
+---
+
+The `zenv()` factory function accepts a `ZEnvConfig` object. Three fields are always required (`token`, `projectKey`, `projectId`); the rest tune validation behaviour and API routing. This page documents every option, the environment variables that map to them, and a complete configuration example.
+
+## Environment variable mapping
+
+The SDK does not auto-read environment variables — you pass them explicitly in your config. The conventional mapping is:
+
+| Config option | Environment variable | Notes |
+|---|---|---|
+| `token` | `ZENV_TOKEN` | Required. Service token with `ze_` prefix. |
+| `projectKey` | `ZENV_PROJECT_KEY` | Required. Never sent to the server. |
+| `projectId` | `ZENV_PROJECT_ID` | Required. Found in the project settings. |
+| `environment` | `NODE_ENV` | Defaults to `"development"` if omitted. |
+
+## Config reference
+
+<ParamField path="token" type="string" required>
+  Service token that authenticates requests to the zEnv API. Obtain it from your project's **Settings → Tokens** page. Conventionally read from `ZENV_TOKEN`.
+</ParamField>
+
+<ParamField path="projectKey" type="string" required>
+  Project Vault Key used to derive the local encryption key via Argon2id. This value is **never sent to the server** — it is only used client-side to unwrap the Project DEK. Conventionally read from `ZENV_PROJECT_KEY`.
+</ParamField>
+
+<ParamField path="projectId" type="string" required>
+  The unique identifier for the project whose secrets you want to load. Conventionally read from `ZENV_PROJECT_ID`.
+</ParamField>
+
+<ParamField path="environment" type="string" default="development">
+  The environment to target when fetching secrets. Typical values are `"development"`, `"staging"`, and `"production"`. Maps to `NODE_ENV` by convention. Defaults to `"development"` when omitted.
+</ParamField>
+
+<ParamField path="schema" type="object">
+  A [Standard Schema v1](https://github.com/standard-schema/standard-schema) compliant validator (Zod, Valibot, ArkType) or a plain object. The schema serves two purposes: it defines which secret keys to fetch (the fetch manifest), and it validates and transforms the decrypted values. See [schema validation](/sdk/schema-validation) for full details.
+</ParamField>
+
+<ParamField path="strict" type="boolean" default="true">
+  When `true` and a schema is defined, calls to `vault.get()` and `vault.select()` will throw immediately if you request a key that is not in the schema. Set to `false` to allow fetching arbitrary keys as raw strings even when a schema is present.
+</ParamField>
+
+<ParamField path="disableValidation" type="boolean" default="false">
+  When `true`, schema keys are still used as the fetch manifest but no value validation or transformation runs — all secrets are returned as raw strings. A console warning is emitted at startup. Not recommended for production.
+</ParamField>
+
+<ParamField path="baseUrl" type="string" default="https://api.zenv.sh">
+  The base URL for the zEnv API. Override this when running a self-hosted zEnv instance. Trailing slashes are stripped automatically.
+</ParamField>
+
+## Complete example
+
+```typescript
+import { zenv } from "@zenv/sdk";
+import { z } from "zod";
+
+const vault = zenv({
+  // Required credentials
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+
+  // Target the correct environment
+  environment: process.env.NODE_ENV, // "development" | "staging" | "production"
+
+  // Schema: fetch manifest + validation
+  schema: z.object({
+    STRIPE_API_KEY: z.string().min(1),
+    DATABASE_URL:   z.string().url(),
+    PORT:           z.string().transform(Number),
+  }),
+
+  // Strict mode — reject get() calls for keys not in schema (default: true)
+  strict: true,
+
+  // Disable validation — schema used as fetch manifest only (default: false)
+  disableValidation: false,
+
+  // Self-hosted: override the API base URL
+  baseUrl: "https://api.zenv.sh",
+});
+
+const secrets = await vault.load();
+```
+
+## Self-hosted deployments
+
+<Note>
+If you run your own zEnv API server, set `baseUrl` to your server's origin. The SDK appends API paths to this value, so omit any trailing path segments.
+
+```typescript
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  baseUrl:    "https://zenv.internal.example.com",
+});
+```
+</Note>
+
+## Validation and error handling
+
+The SDK validates required fields at construction time and throws descriptive errors before any network request is made:
+
+- Missing `token` → `[zEnv] Missing ZENV_TOKEN. Set it in your environment: export ZENV_TOKEN=ze_...`
+- Missing `projectKey` → `[zEnv] Missing ZENV_PROJECT_KEY. Set it in your environment: export ZENV_PROJECT_KEY=...`
+- Missing `projectId` → `[zEnv] Missing projectId. Set it in your config or via ZENV_PROJECT_ID.`
+- Browser environment detected → throws with instructions to use `@zenv/vite-plugin`
+
+When `disableValidation: true` is set, the SDK emits a console warning at startup:
+
+```
+[zEnv] disableValidation is enabled. Schema value validation will not run. Not recommended for production.
+```

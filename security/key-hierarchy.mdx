@@ -1,0 +1,215 @@
+---
+title: "Key hierarchy: Vault Key to ciphertext"
+description: "A complete walkthrough of zEnv's key derivation chain — from Argon2id's single run through KEK, DEK, and per-item AES-256-GCM encryption."
+---
+
+zEnv's encryption model is built around a strict, one-way key derivation chain. A single Argon2id run on the Vault Key produces two 32-byte keys. One wraps the Data Encryption Key (DEK); the other is hashed and sent to the server for Vault Key verification. The DEK then encrypts each secret individually. Nothing in this chain is reversible without the original Vault Key.
+
+## The full derivation chain
+
+```
+Vault Key (user's memory — PIN or passphrase)
+  │
+  ▼ Argon2id — ONE run, 64-byte output
+  ┌──────────────────────────────────┐
+  │ bytes 0-31        bytes 32-63    │
+  │ KEK               Auth Key       │
+  │ (wraps DEK)       (server verify)│
+  └──────────────────────────────────┘
+        │
+        ▼ AES-256-GCM unwrap
+      DEK (Data Encryption Key)
+        │
+        ▼ AES-256-GCM per item
+      Encrypted vault items (one per DB row)
+```
+
+Each level in the chain has a single, well-defined role. No key is reused across roles.
+
+## Step 1: Argon2id key derivation
+
+The Vault Key — a PIN or passphrase known only to the user — is the root of the entire chain. It is never transmitted. When the client unlocks a vault, it passes the Vault Key and a stored salt to `DeriveKeys`, which runs Argon2id exactly once and splits the 64-byte output:
+
+```go
+// amnesia/derive.go
+func DeriveKeys(vaultKey string, salt []byte, keyType KeyType) (kek, authKey []byte) {
+    params := ParamsForKeyType(keyType)
+
+    derived := argon2.IDKey(
+        []byte(vaultKey),
+        salt,
+        params.Iterations,
+        params.Memory,
+        params.Parallelism,
+        DerivedKeySize, // 64
+    )
+
+    kek = make([]byte, KeySize)     // 32 bytes
+    authKey = make([]byte, KeySize) // 32 bytes
+    copy(kek, derived[:KeySize])
+    copy(authKey, derived[KeySize:])
+
+    return kek, authKey
+}
+```
+
+Argon2id parameters are tuned by key type to compensate for differing entropy budgets:
+
+| Key type | Memory | Iterations | Parallelism | Use case |
+|---|---|---|---|---|
+| `pin` | 256 MB | 10 | 4 | ~20-bit entropy; Argon2id does the heavy lifting |
+| `passphrase` | 64 MB | 3 | 4 | ~50–70-bit entropy; passphrase entropy dominates |
+
+<Warning>
+  Argon2id runs exactly once per vault unlock. Running it twice, or splitting its inputs across two calls, would break cross-language parity and produce different keys than the stored wrapped DEK expects.
+</Warning>
+
+## Step 2: Key roles after derivation
+
+The 64-byte Argon2id output is split by fixed index convention — bytes 0–31 are the KEK, bytes 32–63 are the Auth Key. These two keys serve entirely separate purposes and are never substituted for each other.
+
+<CardGroup cols={2}>
+  <Card title="KEK (bytes 0–31)" icon="key">
+    The Key Encryption Key. Used exclusively to wrap and unwrap the DEK via AES-256-GCM. The KEK is derived client-side, never transmitted, and discarded after the DEK is unwrapped for the current session.
+  </Card>
+  <Card title="Auth Key (bytes 32–63)" icon="shield-check">
+    Used for Vault Key verification. The client hashes it with `HashAuthKey` (Argon2id) and sends the hash to the server. The server stores only the hash — not the Auth Key — so even a database breach cannot recover the Auth Key.
+  </Card>
+</CardGroup>
+
+The Auth Key hash is computed before transmission:
+
+```go
+// amnesia/hash.go
+func HashAuthKey(authKey []byte) []byte {
+    // Salt derived from the auth key itself — acceptable because auth key
+    // already has high entropy (32 bytes from Argon2id output).
+    salt := sha256Sum(authKey)[:SaltSize]
+
+    return argon2.IDKey(
+        authKey,
+        salt,
+        3,       // iterations
+        64*1024, // 64 MB
+        4,       // parallelism
+        KeySize, // 32-byte output
+    )
+}
+```
+
+## Step 3: DEK wrapping and unwrapping
+
+The DEK is a 32-byte random key generated once at project creation. It is never stored in plaintext. Instead, it is wrapped (encrypted) with the KEK using AES-256-GCM and stored server-side as `(wrappedDEK, nonce)`:
+
+```go
+// amnesia/symmetric.go
+
+// WrapKey wraps a DEK with a KEK using AES-256-GCM.
+func WrapKey(dek, kek []byte) (ciphertext, nonce []byte, err error) {
+    return Encrypt(dek, kek)
+}
+
+// UnwrapKey unwraps a DEK using a KEK.
+func UnwrapKey(ciphertext, nonce, kek []byte) (dek []byte, err error) {
+    return Decrypt(ciphertext, nonce, kek)
+}
+```
+
+`WrapKey` and `UnwrapKey` are semantically identical to `Encrypt` and `Decrypt` — they are named separately to make the intent explicit at each call site. Each call to `Encrypt` generates a fresh random 96-bit nonce, so the same DEK wrapped twice produces different ciphertext.
+
+The reason the DEK is wrapped rather than stored plaintext: the server holds the wrapped DEK (ciphertext), but cannot unwrap it without the KEK, which requires the Vault Key. The DEK is the only key that actually touches plaintext secrets, and it is protected by this indirection.
+
+## Step 4: Per-item AES-256-GCM encryption
+
+Each secret is encrypted individually with the DEK. The server stores one ciphertext row per secret — there is no single-blob vault model. This means:
+
+- Decrypting one secret does not require decrypting all secrets
+- The blast radius of a single corrupted nonce or ciphertext is limited to one item
+- Items can be updated or deleted without re-encrypting the entire vault
+
+```go
+// amnesia/symmetric.go
+
+// Encrypt encrypts plaintext using AES-256-GCM with the given key.
+// Returns the ciphertext and a randomly generated 96-bit nonce.
+// Each call produces a unique nonce — never reuse nonces with the same key.
+func Encrypt(plaintext, key []byte) (ciphertext, nonce []byte, err error) {
+    gcm, err := newGCM(key)
+    if err != nil {
+        return nil, nil, err
+    }
+
+    nonce = GenerateNonce()
+    ciphertext = gcm.Seal(nil, nonce, plaintext, nil)
+    return ciphertext, nonce, nil
+}
+```
+
+The nonce is 12 bytes (96 bits), generated from `crypto/rand` on every call. AES-256-GCM provides both confidentiality and authentication — a tampered ciphertext will fail decryption with `ErrDecryptionFailed`.
+
+## Amnesia Go API reference
+
+The full Amnesia Go API for the key hierarchy operations:
+
+```go
+// Key derivation
+DeriveKeys(vaultKey string, salt []byte, keyType KeyType) (kek, authKey []byte)
+
+// Symmetric encryption (AES-256-GCM, 96-bit random nonce per call)
+Encrypt(plaintext, key []byte) (ciphertext, nonce []byte, err error)
+Decrypt(ciphertext, nonce, key []byte) (plaintext []byte, err error)
+
+// Key wrapping (semantically identical to Encrypt/Decrypt)
+WrapKey(dek, kek []byte) (ciphertext, nonce []byte, err error)
+UnwrapKey(ciphertext, nonce, kek []byte) (dek []byte, err error)
+
+// Auth Key hashing before server storage
+HashAuthKey(authKey []byte) []byte
+
+// Secure random generation
+GenerateSalt() []byte   // 32 bytes
+GenerateNonce() []byte  // 12 bytes
+GenerateKey() []byte    // 32 bytes
+```
+
+## TypeScript Amnesia: byte-identical output
+
+The TypeScript `@zenv/amnesia` package is a reimplementation of the same chain using Web Crypto API and hash-wasm. It must produce byte-identical output to Go Amnesia for the same inputs — this is enforced by shared JSON test vectors that run in CI:
+
+```typescript
+// @zenv/amnesia TypeScript API — same operations, same output
+deriveKeys(vaultKey: string, salt: Uint8Array, keyType: "pin" | "passphrase")
+  → Promise<{ kek: Uint8Array; authKey: Uint8Array }>
+
+encrypt(plaintext: Uint8Array, key: Uint8Array)
+  → Promise<{ ciphertext: Uint8Array; nonce: Uint8Array }>
+decrypt(ciphertext: Uint8Array, nonce: Uint8Array, key: Uint8Array)
+  → Promise<Uint8Array>
+
+wrapKey(dek: Uint8Array, kek: Uint8Array) → Promise<{ ciphertext: Uint8Array; nonce: Uint8Array }>
+unwrapKey(ciphertext: Uint8Array, nonce: Uint8Array, kek: Uint8Array) → Promise<Uint8Array>
+
+hashAuthKey(authKey: Uint8Array) → Promise<Uint8Array>
+```
+
+The parity guarantee means a secret encrypted by the CLI (Go) can be decrypted by the SDK (TypeScript) and vice versa — they share the same key derivation and the same ciphertext format.
+
+<Tip>
+  Cross-language parity is verified by 8 dedicated test vectors covering `DeriveKeys`, AES-256-GCM round trips, `HashName`, and `HashAuthKey`. Any drift between the Go and TypeScript implementations fails CI immediately.
+</Tip>
+
+## Asymmetric encryption: team sharing
+
+For scenarios where a secret must be shared with another party without exchanging a symmetric key, Amnesia provides X25519 keypairs and NaCl box encryption:
+
+```go
+GenerateKeypair() (publicKey, privateKey []byte, err error)
+WrapWithPublicKey(payload, publicKey []byte) ([]byte, error)
+UnwrapWithPrivateKey(ciphertext, privateKey []byte) ([]byte, error)
+```
+
+`WrapWithPublicKey` generates an ephemeral X25519 keypair for each operation. The output format is `[24-byte nonce][32-byte ephemeral public key][NaCl sealed box]`. The sender's long-term identity is not embedded — each encryption is unlinkable to the sender.
+
+<Info>
+  Asymmetric encryption in Amnesia is used for sharing Item Keys and Project Vault Keys with team members. It does not replace the symmetric DEK-based encryption used for individual vault items.
+</Info>

@@ -1,0 +1,133 @@
+---
+title: "zEnv REST API reference overview"
+description: "Complete reference for the zEnv HTTP API — base URL, versioning, authentication mechanisms, and an index of all resource groups."
+---
+
+The zEnv REST API is a JSON-over-HTTP interface that lets you store and retrieve encrypted secrets, manage projects, and create service tokens. The server is a ciphertext warehouse — it never sees plaintext. All encryption and decryption happen client-side using the [Amnesia](https://github.com/Judeadeniji/zenv-sh) crypto engine before any data reaches the API.
+
+## Base URL
+
+All endpoints are served under a versioned path prefix:
+
+```
+https://api.zenv.sh/v1
+```
+
+If you are running a self-hosted instance, replace `https://api.zenv.sh` with your own base URL. The `/v1/` prefix is always required.
+
+## OpenAPI spec
+
+The OpenAPI specification is auto-generated from [swag](https://github.com/swaggo/swag) annotations in the handler source files. Two formats are available in the repository:
+
+| Format | Path |
+|---|---|
+| Swagger 2.0 | `api/docs/swagger.json` |
+| OpenAPI 3.0 | `api/docs/openapi.json` |
+
+Regenerate the spec at any time with:
+
+```bash
+make swagger
+```
+
+## Authentication
+
+The API has two independent authentication mechanisms depending on the caller type.
+
+<CardGroup cols={2}>
+  <Card title="Bearer token" icon="key" href="/api-reference/authentication">
+    Machine access for the SDK and CLI. Pass `Authorization: Bearer ze_...` on every request. Tokens are scoped to a project, environment, and permission level.
+  </Card>
+  <Card title="Session cookie" icon="lock" href="/api-reference/authentication">
+    Human access for dashboard users. A session cookie (`session_id`) is issued after identity verification. The vault must also be unlocked before accessing secrets.
+  </Card>
+</CardGroup>
+
+See [Authenticating with the zEnv API](/api-reference/authentication) for full details on both mechanisms.
+
+## Resource groups
+
+<CardGroup cols={2}>
+  <Card title="Auth" icon="shield-check" href="/api-reference/auth">
+    Vault setup, unlock, lock, and auth state. Handles the cryptographic onboarding flow and session lifecycle.
+  </Card>
+  <Card title="Secrets" icon="file-lock" href="/api-reference/secrets">
+    Store and retrieve encrypted vault items. Dual endpoints: `POST /v1/secrets` for dashboard access and `POST /v1/sdk/secrets` for Bearer token access.
+  </Card>
+  <Card title="Projects" icon="folder" href="/api-reference/projects">
+    Create projects with client-generated crypto material, list and get project details, and retrieve project salt and wrapped DEK for the SDK.
+  </Card>
+  <Card title="Tokens" icon="terminal" href="/api-reference/tokens">
+    Create scoped service tokens (shown exactly once), list token metadata, and revoke tokens instantly.
+  </Card>
+</CardGroup>
+
+## Endpoint summary
+
+### Auth
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/auth/setup-vault` | session | Store client-generated crypto material |
+| POST | `/v1/auth/unlock` | session | Verify Vault Key, return wrapped DEK |
+| POST | `/v1/auth/lock` | session | Lock the vault (clear unlock state) |
+| GET | `/v1/auth/me` | session | Return current auth and vault state |
+| PUT | `/v1/auth/change-vault-key` | session | Rotate vault key without touching secrets |
+
+### Secrets — dashboard
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/secrets` | session + vault | Store encrypted secret |
+| GET | `/v1/secrets` | session + vault | List secret metadata (never ciphertext) |
+| GET | `/v1/secrets/:nameHash` | session + vault | Get single secret |
+| POST | `/v1/secrets/bulk` | session + vault | Bulk fetch by name hashes |
+| PUT | `/v1/secrets/:nameHash` | session + vault | Update (version auto-incremented) |
+| DELETE | `/v1/secrets/:nameHash` | session + vault | Delete |
+
+### Secrets — SDK / CLI
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/sdk/secrets` | bearer token | Store encrypted secret |
+| GET | `/v1/sdk/secrets` | bearer token | List secret metadata |
+| GET | `/v1/sdk/secrets/:nameHash` | bearer token | Get single secret |
+| POST | `/v1/sdk/secrets/bulk` | bearer token | Bulk fetch by name hashes |
+| PUT | `/v1/sdk/secrets/:nameHash` | bearer token (read\_write) | Update |
+| DELETE | `/v1/sdk/secrets/:nameHash` | bearer token (read\_write) | Delete |
+
+### Projects
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/projects` | session + vault | Create project with crypto material |
+| GET | `/v1/projects` | session + vault | List projects in organization |
+| GET | `/v1/projects/:id` | session + vault | Get single project |
+| GET | `/v1/sdk/projects/:id/crypto` | bearer token | Get project salt + wrapped DEK |
+
+### Service tokens
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/v1/tokens` | session + vault | Create scoped token (shown once) |
+| GET | `/v1/tokens` | session + vault | List tokens (hash never exposed) |
+| DELETE | `/v1/tokens/:id` | session + vault | Revoke instantly |
+
+## Error responses
+
+All errors return a JSON body with a single `error` field:
+
+```json
+{
+  "error": "description of what went wrong"
+}
+```
+
+| Status | Meaning |
+|---|---|
+| `400` | Bad request — malformed body or missing required field |
+| `401` | Unauthenticated — no valid session or token |
+| `403` | Forbidden — token lacks write permission, or wrong Vault Key |
+| `404` | Resource not found |
+| `409` | Conflict — resource already exists |
+| `500` | Internal server error |

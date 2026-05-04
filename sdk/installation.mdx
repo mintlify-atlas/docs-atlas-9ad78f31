@@ -1,0 +1,121 @@
+---
+title: "Install the @zenv/sdk TypeScript package"
+description: "Add @zenv/sdk to your Node.js project, configure your service token and project key, and load typed encrypted secrets in five minutes."
+---
+
+`@zenv/sdk` is the TypeScript client for zEnv. It fetches encrypted secrets from the API, decrypts them locally using `@zenv/amnesia`, validates them against your schema, and returns fully typed results. No crypto logic lives in this package — all cryptographic operations are handled by the Amnesia engine running entirely on your server.
+
+## Requirements
+
+- **Node.js >= 18** (uses the Web Crypto API and `globalThis`)
+- A zEnv account with a project, service token, and project key
+
+<Warning>
+`@zenv/sdk` is **server-only**. The SDK throws a hard error if `window` is defined. `ZENV_TOKEN` and `ZENV_PROJECT_KEY` are server credentials — they must never reach the browser. For build-time injection in browser apps, use `@zenv/vite-plugin` instead.
+</Warning>
+
+## Install the package
+
+<CodeGroup>
+
+```bash pnpm
+pnpm add @zenv/sdk
+```
+
+```bash npm
+npm install @zenv/sdk
+```
+
+```bash yarn
+yarn add @zenv/sdk
+```
+
+</CodeGroup>
+
+## Set your environment variables
+
+The SDK reads credentials from environment variables. Set these in your `.env` file or deployment environment before running your application.
+
+```bash .env
+ZENV_TOKEN=ze_...
+ZENV_PROJECT_KEY=your-project-key
+ZENV_PROJECT_ID=your-project-id
+NODE_ENV=production
+```
+
+<Note>
+`ZENV_PROJECT_KEY` is the vault key used to derive the encryption key locally. It is never sent to the zEnv server. Treat it like a master password — store it in your secrets manager or CI environment, not in source control.
+</Note>
+
+## Basic usage
+
+The SDK exposes a single `zenv()` factory function. Call it once at startup with your config, then use `vault.load()` to fetch, decrypt, and validate all secrets defined in your schema.
+
+<Steps>
+  <Step title="Import and configure">
+    ```typescript
+    import { zenv } from "@zenv/sdk";
+    import { z } from "zod";
+
+    const vault = zenv({
+      token: process.env.ZENV_TOKEN!,
+      projectKey: process.env.ZENV_PROJECT_KEY!,
+      projectId: process.env.ZENV_PROJECT_ID!,
+      environment: process.env.NODE_ENV,
+      schema: z.object({
+        STRIPE_API_KEY: z.string().min(1),
+        DATABASE_URL: z.string().url(),
+        PORT: z.string().transform(Number),
+      }),
+    });
+    ```
+  </Step>
+  <Step title="Load secrets at startup">
+    ```typescript
+    const secrets = await vault.load();
+    // secrets.STRIPE_API_KEY → string
+    // secrets.DATABASE_URL   → string
+    // secrets.PORT           → number (transformed by Zod schema)
+    ```
+
+    `vault.load()` reports all missing or invalid secrets at once and throws before your application starts, so you never run with incomplete configuration.
+  </Step>
+  <Step title="Use the typed results">
+    ```typescript
+    // TypeScript infers the correct types from your schema
+    console.log(secrets.PORT);           // number
+    console.log(secrets.DATABASE_URL);   // string
+    console.log(secrets.STRIPE_API_KEY); // string
+    ```
+  </Step>
+</Steps>
+
+## How decryption works
+
+The SDK never sends your `ZENV_PROJECT_KEY` to the server. Decryption follows this local key derivation chain:
+
+```
+ZENV_PROJECT_KEY + project_salt (from API)
+  → Argon2id → Project KEK (client-side, never sent)
+    → AES-256-GCM unwrap → Project DEK (client-side, never sent)
+      → AES-256-GCM decrypt → plaintext secrets
+```
+
+The server stores only ciphertext. It cannot decrypt your secrets even if compromised.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration options" icon="sliders" href="/sdk/configuration">
+    Learn all `ZEnvConfig` options including strict mode, custom base URLs, and validation settings.
+  </Card>
+  <Card title="Vault methods" icon="code" href="/sdk/methods">
+    Explore `load`, `get`, `set`, `delete`, and `select` with full signatures and examples.
+  </Card>
+  <Card title="Schema validation" icon="shield-check" href="/sdk/schema-validation">
+    Use Zod, Valibot, ArkType, or plain objects for typed secrets and transformations.
+  </Card>
+  <Card title="How it works" icon="lock" href="/how-it-works">
+    Understand the zero-knowledge key hierarchy and encryption model.
+  </Card>
+</CardGroup>

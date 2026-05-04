@@ -1,0 +1,252 @@
+---
+title: "SDK vault methods: load, get, set, delete, select"
+description: "Complete reference for every method on the ZEnv vault object — signatures, parameters, return types, and behaviour under different config combinations."
+---
+
+Once you have a vault instance from `zenv()`, five methods give you full read and write access to your encrypted secrets. All methods initialise the crypto state on first call — Argon2id key derivation and DEK unwrapping happen once and are cached for the lifetime of the vault instance.
+
+## Behaviour matrix
+
+The combination of `schema`, `strict`, and `disableValidation` controls what each method does:
+
+| Schema | Method | `strict` | `disableValidation` | Behaviour |
+|---|---|---|---|---|
+| Defined | `load()` | `true` | `false` | Fetch schema keys, validate, return typed object |
+| Defined | `get(validKey)` | `true` | `false` | Fetch single secret, validate against schema field |
+| Defined | `get(unknownKey)` | `true` | `false` | Throw immediately — key not in schema |
+| Defined | `get(anyKey)` | `false` | `false` | Fetch as raw string, known keys still validated |
+| Defined | any | any | `true` | Key enforcement per `strict`, value validation skipped |
+| None | `load()` | — | — | Fetch **all** secrets for the project/environment as raw strings |
+| None | `get(anyKey)` | — | — | Fetch and return raw string |
+
+---
+
+## `vault.load()`
+
+`load()` is the primary method for application startup. It fetches all secrets defined in your schema, decrypts them locally, validates and transforms the values, and returns a typed object. All validation errors are collected and thrown together so you see every problem at once.
+
+**Signatures**
+
+```typescript
+// Use the schema from the constructor
+load(): Promise<InferSchema<S>>
+
+// Override with a one-off schema
+load<O extends Record<string, unknown>>(schema: O): Promise<InferSchema<O>>
+```
+
+**When called without a schema** (neither in constructor nor as argument), `load()` fetches all secrets for the project and environment as raw strings. This is useful for administrative scripts but not typical application startup.
+
+**Example — startup with Zod schema**
+
+```typescript
+import { zenv } from "@zenv/sdk";
+import { z } from "zod";
+
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  schema: z.object({
+    STRIPE_API_KEY: z.string().min(1),
+    DATABASE_URL:   z.string().url(),
+    PORT:           z.string().transform(Number),
+  }),
+});
+
+const secrets = await vault.load();
+// secrets.STRIPE_API_KEY → string
+// secrets.DATABASE_URL   → string
+// secrets.PORT           → number (transformed by schema)
+```
+
+**Example — one-off schema override**
+
+```typescript
+// Load only a subset of secrets without changing the constructor schema
+const subset = await vault.load({ API_KEY: {}, DB_URL: {} });
+```
+
+<Note>
+If any secret defined in the schema is missing from the vault, or any value fails validation, `load()` throws with a formatted list of all errors and the message `"Application did not start. Fix the above and retry."` — it never starts your app in a partially-configured state.
+</Note>
+
+---
+
+## `vault.get(name)`
+
+Fetch a single secret by name. The name is hashed with HMAC-SHA256 before the request — the server never sees plaintext key names.
+
+**Signature**
+
+```typescript
+get(name: string): Promise<string>
+```
+
+**Parameters**
+
+<ParamField path="name" type="string" required>
+  The plaintext secret name as stored in the vault (e.g. `"STRIPE_API_KEY"`).
+</ParamField>
+
+**Returns** — `Promise<string>`. If a schema is defined and validation is not disabled, the value is validated against the matching schema field. Note that even if your Zod schema transforms the value (e.g. `z.string().transform(Number)`), `get()` always returns the raw string — transformations only apply to `load()`.
+
+**Strict mode behaviour**
+
+When `strict: true` (the default) and a schema is defined, calling `get()` with a key that is not in the schema throws immediately without making a network request:
+
+```
+[zEnv] 'UNKNOWN_KEY' is not defined in your schema.
+  Defined keys: STRIPE_API_KEY, DATABASE_URL, PORT
+  Either add 'UNKNOWN_KEY' to your schema or check for a typo.
+```
+
+**Example**
+
+```typescript
+// In strict mode — key must be in schema
+const apiKey = await vault.get("STRIPE_API_KEY");
+
+// Without a schema — fetch any key as a raw string
+const raw = await vault.get("SOME_KEY");
+```
+
+---
+
+## `vault.set(name, value)`
+
+Encrypt a secret and store it in the vault. If the secret already exists it is updated; if it does not exist it is created. Encryption happens locally before the ciphertext is sent to the API — the server never sees the plaintext value.
+
+**Signature**
+
+```typescript
+set(name: string, value: string): Promise<void>
+```
+
+**Parameters**
+
+<ParamField path="name" type="string" required>
+  The plaintext secret name. The name is HMAC-SHA256 hashed before the API request.
+</ParamField>
+
+<ParamField path="value" type="string" required>
+  The plaintext secret value. Encrypted locally with AES-256-GCM before transmission.
+</ParamField>
+
+**Returns** — `Promise<void>`
+
+**Example**
+
+```typescript
+// Create or update a secret
+await vault.set("DATABASE_URL", "postgres://prod:secret@db.example.com/myapp");
+
+// Rotate an API key
+await vault.set("STRIPE_API_KEY", "sk_live_newkey123");
+```
+
+<Note>
+`set()` uses a upsert strategy: it attempts a `PUT` first. If the secret does not exist (404), it falls back to a `POST` to create it.
+</Note>
+
+---
+
+## `vault.delete(name)`
+
+Delete a secret from the vault permanently. The name is hashed before the request — the API only receives the HMAC hash.
+
+**Signature**
+
+```typescript
+delete(name: string): Promise<void>
+```
+
+**Parameters**
+
+<ParamField path="name" type="string" required>
+  The plaintext name of the secret to delete.
+</ParamField>
+
+**Returns** — `Promise<void>`
+
+**Example**
+
+```typescript
+await vault.delete("OLD_API_KEY");
+```
+
+---
+
+## `vault.select()`
+
+Fetch a subset of secrets in a single bulk request. Useful when you want specific secrets without loading everything in the schema, or when different parts of your application need different subsets.
+
+**Signatures**
+
+```typescript
+// Variadic strings
+select(...names: string[]): Promise<Record<string, string>>
+
+// String array
+select(names: string[]): Promise<Record<string, string>>
+
+// Schema (extracts keys + validates)
+select(schema: Record<string, unknown>): Promise<Record<string, unknown>>
+```
+
+<Tabs>
+  <Tab title="Variadic strings">
+    ```typescript
+    // Request specific keys by name
+    const result = await vault.select("STRIPE_API_KEY", "DATABASE_URL");
+    // result.STRIPE_API_KEY → string
+    // result.DATABASE_URL   → string
+    ```
+
+    When the vault has a constructor schema and `strict: true`, each name must be in the schema or the call throws immediately.
+  </Tab>
+  <Tab title="String array">
+    ```typescript
+    const keys = ["STRIPE_API_KEY", "DATABASE_URL"];
+    const result = await vault.select(keys);
+    ```
+
+    Useful when the set of keys is determined at runtime.
+  </Tab>
+  <Tab title="Inline schema">
+    ```typescript
+    import { z } from "zod";
+
+    // Pass a schema to both select the keys and validate the values
+    const result = await vault.select(
+      z.object({
+        STRIPE_API_KEY: z.string().min(1),
+        DATABASE_URL:   z.string().url(),
+      })
+    );
+    // result.STRIPE_API_KEY and result.DATABASE_URL are validated
+    ```
+
+    When you pass an inline schema, strict-mode key checking against the constructor schema is bypassed — the inline schema acts as its own manifest and validator.
+  </Tab>
+</Tabs>
+
+**Strict mode behaviour**
+
+When `strict: true` and a constructor schema is defined, string-based `select()` calls validate that every requested key is present in the schema. Passing an inline schema to `select()` bypasses this check.
+
+**Validation**
+
+After decryption, `select()` determines which schema to validate against in this order:
+
+1. Inline schema passed to `select(schema)` 
+2. Constructor schema, picking only the requested keys via `pickSchema()`
+3. No validation (returns raw strings)
+
+If validation is disabled (`disableValidation: true`), secrets are always returned as raw strings regardless of which schema is active.
+
+**Example — loading credentials for a single service**
+
+```typescript
+const paymentSecrets = await vault.select("STRIPE_API_KEY", "STRIPE_WEBHOOK_SECRET");
+```

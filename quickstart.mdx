@@ -1,81 +1,185 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get started with zEnv"
+description: "Set your credentials, store your first encrypted secret, and fetch it back using the CLI and the TypeScript SDK — all in a few minutes."
 ---
 
-## Get started in three steps
+This guide walks you through the full cycle: configuring credentials, storing a secret via the CLI, and loading it in a TypeScript application with the SDK. All encryption happens on your machine before anything touches the network.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  zEnv is pre-alpha software. APIs will break without notice and no security audit has been completed. Do not use it to store secrets you depend on in production.
+</Warning>
 
-### Step 1: Set up your local environment
+<Steps>
+  <Step title="Start the API server">
+    zEnv requires a running API server backed by PostgreSQL and Redis. Start the local dev stack with Docker Compose, then run migrations and build the binaries.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    # Start Postgres + Redis
+    make dev-up
 
-### Step 2: Deploy your changes
+    # Run database migrations
+    make migrate
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    # Build the CLI and API server binaries
+    make build
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    Once the build completes, start the API server:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    DATABASE_URL="postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable" \
+    REDIS_URL="redis://localhost:6379" \
+    ./bin/zenv-api
+    ```
 
-### Step 3: Go live
+    The server listens on port `8080` by default.
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Set your credentials">
+    The CLI and SDK both authenticate using a service token and a project key. Set these as environment variables — the project key never leaves your machine.
+
+    ```bash
+    export ZENV_TOKEN=ze_development_...      # Service token (from the dashboard or API)
+    export ZENV_PROJECT_KEY=...               # Your project's Vault Key — never sent to server
+    export ZENV_PROJECT=<project-id>          # Project UUID
+    export ZENV_ENV=development               # Target environment
+    ```
+
+    Alternatively, commit a `.zenv` file to your repository so the whole team inherits the project context automatically:
+
+    ```ini
+    # .zenv — safe to commit, contains no secrets
+    project=ecommerce-backend
+    env=development
+    ```
+
+    The CLI resolves context in this order: explicit flags → `.zenv` file → environment variables → default.
+  </Step>
+
+  <Step title="Store a secret via the CLI">
+    Encrypt a secret client-side and store it in the vault. The CLI uses the Go Amnesia engine natively — no WASM, no runtime dependency.
+
+    ```bash
+    ./bin/zenv secrets set DATABASE_URL "postgres://prod:secret@db.internal/myapp"
+    ```
+
+    The value is encrypted locally before the request is sent. The server receives only ciphertext.
+
+    To confirm it was stored:
+
+    ```bash
+    ./bin/zenv secrets get DATABASE_URL
+    # postgres://prod:secret@db.internal/myapp
+    ```
+
+    List all secrets in the current environment (metadata only — values are never returned by list):
+
+    ```bash
+    ./bin/zenv secrets list
+    ```
+  </Step>
+
+  <Step title="Inject secrets into a process">
+    Use `zenv run` to decrypt all secrets and inject them as environment variables into any command. This works with any language or runtime.
+
+    ```bash
+    ./bin/zenv run -- node server.js
+    ./bin/zenv run -- python app.py
+    ```
+
+    For CI validation before a deployment, `zenv check` exits with code `1` if any required secrets are missing:
+
+    ```bash
+    ./bin/zenv check DATABASE_URL STRIPE_KEY JWT_SECRET --env production
+    ```
+  </Step>
+
+  <Step title="Install the TypeScript SDK">
+    For server-side TypeScript applications, install `@zenv/sdk`:
+
+    ```bash
+    pnpm add @zenv/sdk
+    ```
+
+    <Note>
+      The SDK throws a hard error if `window` is defined. `ZENV_TOKEN` and `ZENV_PROJECT_KEY` are server credentials — they must never reach the browser.
+    </Note>
+  </Step>
+
+  <Step title="Load secrets with the SDK">
+    Create a vault client, define a Zod schema, and call `vault.load()`. The SDK fetches the ciphertext, decrypts it locally using `@zenv/amnesia`, and validates the result against your schema.
+
+    ```typescript
+    import { zenv } from "@zenv/sdk";
+    import { z } from "zod";
+
+    const vault = zenv({
+      token: process.env.ZENV_TOKEN!,
+      projectKey: process.env.ZENV_PROJECT_KEY!,
+      projectId: process.env.ZENV_PROJECT_ID!,
+      environment: process.env.NODE_ENV,
+      schema: z.object({
+        STRIPE_API_KEY: z.string().min(1),
+        DATABASE_URL: z.string().url(),
+        PORT: z.string().transform(Number),
+      }),
+    });
+
+    const secrets = await vault.load();
+    // secrets.STRIPE_API_KEY → string
+    // secrets.DATABASE_URL   → string
+    // secrets.PORT           → number (transformed by schema)
+    ```
+
+    You can also fetch a single secret or write one back:
+
+    ```typescript
+    // Fetch a single secret
+    const apiKey = await vault.get("STRIPE_API_KEY");
+
+    // Write a secret (encrypts locally, stores ciphertext)
+    await vault.set("DATABASE_URL", "postgres://prod:secret@db/myapp");
+
+    // Delete a secret
+    await vault.delete("OLD_API_KEY");
+    ```
+  </Step>
+
+  <Step title="Export secrets to a .env file">
+    Pull all secrets for an environment into a local `.env` file using the CLI:
+
+    ```bash
+    # Write to .env.local (default)
+    ./bin/zenv env pull
+
+    # Write to a custom file
+    ./bin/zenv env pull -o .env.production
+
+    # Print to stdout
+    ./bin/zenv env pull -o -
+    ```
+
+    To compare two environments:
+
+    ```bash
+    ./bin/zenv env diff development production
+    ```
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="How it works" icon="shield-halved" href="/how-it-works">
+    Understand the full cryptographic flow from Vault Key to ciphertext.
+  </Card>
+  <Card title="SDK configuration" icon="sliders" href="/sdk/configuration">
+    All `zenv()` options: strict mode, schema validation, and custom base URL.
+  </Card>
+  <Card title="CLI commands" icon="rectangle-terminal" href="/cli/commands">
+    Full reference for `secrets`, `env`, `run`, `check`, `tokens`, and `auth`.
+  </Card>
+  <Card title="Service tokens" icon="key" href="/api-reference/tokens">
+    Create scoped tokens for CI pipelines and server environments.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

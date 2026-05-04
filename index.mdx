@@ -1,133 +1,119 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "zEnv: Zero-Knowledge Secret Manager"
+description: "Store and share API keys, credentials, and passwords with mathematical certainty that even the server cannot read your data."
 ---
 
-## Setting up
+zEnv is a zero-knowledge secret manager built for teams who need to store, share, and inject secrets securely. Unlike traditional secret managers, all encryption and decryption happens on your machine — the zEnv server is a ciphertext warehouse that mathematically cannot read your data.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from zero to storing and fetching your first secret in under 5 minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="How it works" icon="shield-halved" href="/how-it-works">
+    Understand the zero-knowledge architecture and client-side cryptography model.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="TypeScript SDK" icon="code" href="/sdk/installation">
+    Fetch, decrypt, and validate secrets with full type safety using `@zenv/sdk`.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="CLI Reference" icon="terminal" href="/cli/commands">
+    Manage secrets, inject them into processes, and automate with the `zenv` CLI.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What makes zEnv different
 
-Everything you need to create world-class documentation.
+zEnv's core property: **the server never sees your plaintext secrets**. Encryption and decryption happen entirely on your device using the Amnesia cryptographic engine. The server stores only ciphertext it cannot decrypt.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Client-side crypto" icon="lock">
+    AES-256-GCM encryption with Argon2id key derivation — all computed locally before any data leaves your machine.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Zero-trust server" icon="server">
+    The API stores encrypted blobs only. Even with full database access, secrets remain protected.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Typed secrets" icon="check-double">
+    The TypeScript SDK validates decrypted values against your Zod, Valibot, or ArkType schema.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## Getting started
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Install the CLI or SDK">
+    Build the CLI from source or install the TypeScript SDK via pnpm.
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    ```bash
+    # CLI (from source)
+    make build
+    ./bin/zenv --help
 
-## Need inspiration?
+    # TypeScript SDK
+    pnpm add @zenv/sdk
+    ```
+  </Step>
+  <Step title="Set your credentials">
+    Configure your service token and project key as environment variables.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    ```bash
+    export ZENV_TOKEN=ze_...
+    export ZENV_PROJECT_KEY=...
+    export ZENV_PROJECT=<project-id>
+    export ZENV_ENV=production
+    ```
+  </Step>
+  <Step title="Store your first secret">
+    Encrypt a secret client-side and store it in the vault.
+
+    ```bash
+    zenv secrets set DATABASE_URL "postgres://prod:secret@db.internal/myapp"
+    ```
+  </Step>
+  <Step title="Fetch it in your application">
+    Load and validate secrets with the TypeScript SDK.
+
+    ```typescript
+    import { zenv } from "@zenv/sdk";
+    import { z } from "zod";
+
+    const vault = zenv({
+      token: process.env.ZENV_TOKEN!,
+      projectKey: process.env.ZENV_PROJECT_KEY!,
+      projectId: process.env.ZENV_PROJECT_ID!,
+      schema: z.object({
+        DATABASE_URL: z.string().url(),
+        STRIPE_API_KEY: z.string().min(1),
+      }),
+    });
+
+    const secrets = await vault.load();
+    // secrets.DATABASE_URL → validated string
+    ```
+  </Step>
+</Steps>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="SDK configuration" icon="sliders" href="/sdk/configuration">
+    All `zenv()` config options: token, schema, strict mode, and base URL.
+  </Card>
+  <Card title="SDK methods" icon="function" href="/sdk/methods">
+    `load()`, `get()`, `set()`, `delete()`, and `select()` — full method reference.
+  </Card>
+  <Card title="CLI commands" icon="rectangle-terminal" href="/cli/commands">
+    Complete reference for `secrets`, `env`, `run`, `check`, and `tokens` commands.
+  </Card>
+  <Card title="API reference" icon="webhook" href="/api-reference/overview">
+    REST endpoints for secrets, projects, tokens, and auth — with request/response schemas.
+  </Card>
+  <Card title="Key hierarchy" icon="diagram-project" href="/security/key-hierarchy">
+    How Vault Key → KEK → DEK → ciphertext keeps secrets mathematically safe.
+  </Card>
+  <Card title="Self-hosting" icon="house-chimney-window" href="/self-hosting/overview">
+    Run your own zEnv API server with Docker Compose and PostgreSQL.
+  </Card>
+</CardGroup>
+
+<Warning>
+  zEnv is pre-alpha software. Breaking changes happen without notice. Do not use it to store secrets you depend on in production until a security audit is complete.
+</Warning>

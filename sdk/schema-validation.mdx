@@ -1,0 +1,167 @@
+---
+title: "Schema validation and type inference in @zenv/sdk"
+description: "Use Standard Schema v1 validators — Zod, Valibot, ArkType, or plain objects — to fetch, validate, transform, and type your decrypted secrets."
+---
+
+The `@zenv/sdk` schema system does two jobs with a single declaration: it tells the SDK which secrets to fetch (the **fetch manifest**), and it validates and transforms the decrypted values before returning them to your application. TypeScript infers the output types automatically from your schema, so `vault.load()` returns a fully typed object with no manual type annotations.
+
+## Standard Schema v1 support
+
+The SDK accepts any [Standard Schema v1](https://github.com/standard-schema/standard-schema) compliant validator. This is a shared interface implemented by Zod, Valibot, ArkType, and other popular libraries. The SDK calls `schema["~standard"].validate()` on each field — it does not import or depend on any specific validation library.
+
+## Schema examples
+
+<CodeGroup>
+
+```typescript Zod
+import { zenv } from "@zenv/sdk";
+import { z } from "zod";
+
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  schema: z.object({
+    STRIPE_API_KEY: z.string().min(1),
+    DATABASE_URL:   z.string().url(),
+    PORT:           z.string().transform(Number),
+  }),
+});
+
+const secrets = await vault.load();
+// secrets.PORT → number (transformed by Zod)
+```
+
+```typescript Valibot
+import { zenv } from "@zenv/sdk";
+import * as v from "valibot";
+
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  schema: v.object({
+    STRIPE_API_KEY: v.string(),
+    DATABASE_URL:   v.pipe(v.string(), v.url()),
+    PORT:           v.string(),
+  }),
+});
+
+const secrets = await vault.load();
+```
+
+```typescript ArkType
+import { zenv } from "@zenv/sdk";
+import { type } from "arktype";
+
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  schema: type({
+    STRIPE_API_KEY: "string",
+    DATABASE_URL:   "string",
+    PORT:           "string",
+  }),
+});
+
+const secrets = await vault.load();
+```
+
+```typescript Plain object
+import { zenv } from "@zenv/sdk";
+
+// Plain objects skip validation — keys act as fetch manifest only
+const vault = zenv({
+  token:      process.env.ZENV_TOKEN!,
+  projectKey: process.env.ZENV_PROJECT_KEY!,
+  projectId:  process.env.ZENV_PROJECT_ID!,
+  schema: {
+    STRIPE_API_KEY: {},
+    DATABASE_URL:   {},
+    PORT:           {},
+  },
+});
+
+// All values returned as strings — no validation runs
+const secrets = await vault.load();
+```
+
+</CodeGroup>
+
+## TypeScript type inference
+
+The `InferSchema<T>` utility type extracts the output type from your schema automatically. You never need to write manual type annotations for `vault.load()` or `vault.select()`.
+
+```typescript
+import type { InferSchema } from "@zenv/sdk";
+import { z } from "zod";
+
+const schema = z.object({
+  STRIPE_API_KEY: z.string().min(1),
+  DATABASE_URL:   z.string().url(),
+  PORT:           z.string().transform(Number),
+});
+
+// InferSchema resolves to:
+// { STRIPE_API_KEY: string; DATABASE_URL: string; PORT: number }
+type Secrets = InferSchema<typeof schema>;
+```
+
+The inference rules follow this priority:
+
+1. **Standard Schema object** (e.g. `z.object(...)`) — infers the `Output` type from `~standard.types.output`.
+2. **Plain object with Standard Schema fields** (e.g. `{ KEY: z.string() }`) — maps each key to its validator's output type.
+3. **Plain object with non-validator values** (e.g. `{ KEY: {} }`) — all values infer as `string`.
+
+```typescript
+// From schema.ts
+export type InferSchema<T> = T extends StandardSchemaV1<infer O>
+  ? O
+  : T extends Record<string, StandardSchemaV1<infer V>>
+    ? { [K in keyof T]: V }
+    : { [K in keyof T]: string };
+```
+
+## How key extraction works
+
+The SDK extracts secret names from your schema before making any network request. It inspects the schema object for known shape accessors:
+
+- **Zod** — reads `schema.shape`
+- **Valibot** — reads `schema.entries`
+- **ArkType** — falls through to plain object key enumeration
+- **Plain objects** — uses `Object.keys(schema)`
+
+This means the keys you define in your schema are the only secrets fetched from the API — you never pull down secrets your application does not need.
+
+## How validation works
+
+After decryption, the SDK calls `~standard.validate(rawValue)` on each field's validator. Errors are collected across all fields and thrown together, so you see every problem at once rather than one at a time:
+
+```
+[zEnv] Startup validation failed:
+  DATABASE_URL — Invalid URL
+  PORT — Expected number, received NaN
+
+Application did not start. Fix the above and retry.
+```
+
+If a key in the decrypted result has no corresponding validator in the schema shape (for example when using a plain object with `{}`), the raw string is passed through without validation.
+
+## Strict mode
+
+When `strict: true` (the default) and a schema is defined, calls to `vault.get()` and `vault.select()` that request keys outside the schema throw immediately:
+
+```typescript
+// schema defines: STRIPE_API_KEY, DATABASE_URL, PORT
+const value = await vault.get("REDIS_URL");
+// throws: [zEnv] 'REDIS_URL' is not defined in your schema.
+//   Defined keys: STRIPE_API_KEY, DATABASE_URL, PORT
+//   Either add 'REDIS_URL' to your schema or check for a typo.
+```
+
+Set `strict: false` to allow fetching arbitrary keys as raw strings alongside your defined schema keys.
+
+<Note>
+`disableValidation: true` skips value validation entirely but still uses schema keys as the fetch manifest and still enforces strict-mode key checks. Use it only in environments where you want typed secrets without the overhead of validation, such as testing scaffolds or migration scripts. A console warning is emitted at startup when this option is enabled.
+</Note>

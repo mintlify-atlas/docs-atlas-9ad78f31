@@ -1,0 +1,99 @@
+---
+title: "Zero-knowledge model: what the server can't see"
+description: "How zEnv's client-side encryption ensures the server stores only ciphertext and can never read your plaintext secrets, keys, or secret names."
+---
+
+zEnv is built on a single architectural commitment: the server is a ciphertext warehouse. Every encryption and decryption operation runs inside the Amnesia engine on the client — in the CLI, SDK, or dashboard — before any data is transmitted. The server receives blobs it cannot interpret, and that is by design.
+
+## What "zero-knowledge" means in practice
+
+Zero-knowledge, as used in zEnv, means the server never receives the inputs required to decrypt your data. There is no server-side decryption path, no admin endpoint that can reveal plaintext, and no key escrow. The only way to read a secret is to hold the Vault Key, which never leaves your client.
+
+<CardGroup cols={2}>
+  <Card title="What the server stores" icon="database">
+    - Wrapped DEK (AES-256-GCM ciphertext + nonce)
+    - Encrypted vault items (one ciphertext + nonce per DB row)
+    - HMAC-SHA256 name hashes — not plaintext names
+    - Argon2id hash of the Auth Key — not the Auth Key itself
+    - Argon2id salt (public, required for derivation)
+  </Card>
+  <Card title="What never leaves the client" icon="lock">
+    - Vault Key (your PIN or passphrase)
+    - KEK (Key Encryption Key, bytes 0–31 of Argon2id output)
+    - Auth Key (bytes 32–63 of Argon2id output)
+    - DEK (Data Encryption Key, in plaintext form)
+    - Plaintext secret values and secret names
+  </Card>
+</CardGroup>
+
+<Note>
+  The server stores the Auth Key's Argon2id hash for Vault Key verification. Even this hash cannot reconstruct the Auth Key, the KEK, or the DEK — it is one-way verification only.
+</Note>
+
+## How secret names are hidden: HMAC name hashing
+
+Secret names are not stored in plaintext either. Before any name reaches the server, the client computes `HMAC-SHA256(hmacKey, name)`. The server indexes and looks up vault items by this hash, never by the name itself.
+
+```go
+// amnesia/hash.go
+// HashName computes HMAC-SHA256(hmacKey, name) for server-side indexed lookups.
+// The server can find vault items by name hash without ever knowing the plaintext name.
+func HashName(name string, hmacKey []byte) []byte {
+    mac := hmac.New(sha256.New, hmacKey)
+    mac.Write([]byte(name))
+    return mac.Sum(nil)
+}
+```
+
+The `hmacKey` is derived client-side from the DEK and never transmitted to the server. Two clients holding the same DEK will produce the same hash for the same name, enabling server-side lookups without revealing the name.
+
+## Authentication mechanisms
+
+zEnv supports two authentication paths. Neither path gives the server access to encryption keys.
+
+<CardGroup cols={2}>
+  <Card title="Session auth (dashboard)" icon="browser">
+    Used by the web dashboard. An interactive session is established after the user authenticates. The Vault Key is entered client-side, keys are derived in the browser, and the Auth Key hash is sent to the server for verification. Session cookies grant API access but carry no encryption keys.
+  </Card>
+  <Card title="Bearer token auth (SDK and CLI)" icon="terminal">
+    Used by `@zenv/sdk` and the `zenv` CLI. A `ZENV_TOKEN` authorises API requests and a `ZENV_PROJECT_KEY` is the project-scoped Vault Key used for encryption. Both are environment variables — they authorise and decrypt on the client, not on the server.
+  </Card>
+</CardGroup>
+
+## The browser ban
+
+`ZENV_TOKEN` and `ZENV_PROJECT_KEY` are server credentials: they hold the authority to both authenticate and decrypt a project's secrets. If either were embedded in client-side JavaScript and served to a browser, any visitor could extract them.
+
+For this reason, `@zenv/sdk` throws a hard error if `window` is defined at load time:
+
+```typescript
+// From packages/sdk/src/zenv.ts
+if (typeof globalThis.window !== "undefined") {
+  throw new Error(
+    "[zEnv] @zenv/sdk detected a browser environment (window is defined). " +
+    "ZENV_TOKEN and ZENV_PROJECT_KEY are server credentials — they must never " +
+    "reach the browser. Use @zenv/vite-plugin for build-time injection instead.",
+  );
+}
+```
+
+Use the SDK only in server-side runtimes: Node.js, Bun, Deno, or a serverless function. Fetch secrets at build time or inject them via a server-rendered endpoint — never import `@zenv/sdk` into a module that is bundled for the browser.
+
+<Warning>
+  Exposing `ZENV_TOKEN` or `ZENV_PROJECT_KEY` in browser JavaScript is equivalent to publishing your secrets publicly. The SDK's browser ban is a hard guard, not a soft warning.
+</Warning>
+
+## What a server compromise reveals
+
+Because the server holds only ciphertext and hashes, a full database breach exposes:
+
+- Wrapped DEKs — undecryptable without the KEK, which requires the Vault Key
+- Encrypted vault item ciphertext — undecryptable without the DEK
+- HMAC name hashes — not reversible to plaintext names without the HMAC key
+- Auth Key hashes — Argon2id-hardened, not reversible to the Auth Key
+
+An attacker who obtains the database gains no plaintext secrets and cannot determine secret names. The Vault Key, which was never transmitted, is the only path to plaintext.
+
+<Info>
+  zEnv has not yet completed a third-party security audit. The zero-knowledge design is sound by construction, but independent verification is pending. Do not use zEnv to store production secrets until the audit is complete.
+</Info>

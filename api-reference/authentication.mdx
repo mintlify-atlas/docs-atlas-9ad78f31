@@ -1,0 +1,109 @@
+---
+title: "Authenticating with the zEnv API"
+description: "How to obtain a service token, send it in requests, understand token scopes, and what 401 and 403 errors mean for your integration."
+---
+
+The zEnv API supports two authentication mechanisms: **Bearer tokens** for machine access (SDK, CLI, CI pipelines) and **session cookies** for dashboard users. Most integrations use Bearer tokens. Session auth is handled automatically by the dashboard and is documented here for completeness.
+
+## Bearer tokens (SDK and CLI)
+
+Bearer tokens are long-lived, scoped credentials for programmatic access. Each token is tied to a specific project and environment, and carries either `read` or `read_write` permission.
+
+### Getting a token
+
+<Steps>
+  <Step title="Via the dashboard">
+    Navigate to your project, open the **Tokens** tab, and click **Create token**. Copy the token immediately — it is shown exactly once and cannot be retrieved again.
+  </Step>
+  <Step title="Via the CLI">
+    ```bash
+    zenv tokens create \
+      --project <project-id> \
+      --env production \
+      --permission read_write \
+      --name "ci-deploy"
+    ```
+    The token is printed to stdout on creation. Store it in your secrets manager or CI environment.
+  </Step>
+</Steps>
+
+<Warning>
+The plaintext token value is displayed exactly once at creation. The API stores only a SHA-256 hash. If you lose the token, you must revoke it and create a new one.
+</Warning>
+
+### Token format
+
+All service tokens follow the pattern:
+
+```
+ze_{environment}_{64-char-hex}
+```
+
+The hex segment is 32 random bytes encoded as 64 lowercase hex characters, generated with `crypto/rand`. Examples:
+
+```
+ze_production_a3f9b2c8e1d4f6a1b0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4
+ze_staging_7c1e2a3b4d5f6e7c8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2
+```
+
+The environment segment (`production`, `staging`, `development`) is embedded in the token so you can identify which environment a token belongs to at a glance.
+
+### Sending the token
+
+Include the token in the `Authorization` header on every API request:
+
+```
+Authorization: Bearer ze_production_a3f9b2c8e1d4...
+```
+
+**Example — fetch all secrets in a project:**
+
+```bash
+curl https://api.zenv.sh/v1/sdk/secrets \
+  -H "Authorization: Bearer ze_production_a3f9b2c8e1d4f6a1b0c2d3e4f5a6b7c8" \
+  -G \
+  --data-urlencode "project_id=019612ab-cd34-ef56-ab78-cd901234ef56" \
+  --data-urlencode "environment=production"
+```
+
+### Token scopes
+
+Each token is scoped along three dimensions:
+
+| Dimension | Value | Effect |
+|---|---|---|
+| Project | UUID | Token only works for secrets in this project |
+| Environment | `development` / `staging` / `production` | Token only works for secrets in this environment |
+| Permission | `read` | GET and bulk-fetch only |
+| Permission | `read_write` | GET, POST, PUT, and DELETE |
+
+Attempting a write operation (PUT, DELETE) with a `read`-scoped token returns `403 Forbidden`.
+
+<Tip>
+Use `read`-scoped tokens for application runtime (secret injection at startup) and `read_write`-scoped tokens only for CI pipelines that need to push secrets.
+</Tip>
+
+## Session auth (dashboard users)
+
+Dashboard access uses a two-layer authentication model:
+
+1. **Identity layer** — a session cookie (`session_id`) is issued after the user authenticates with the identity provider (OAuth). This proves who you are.
+2. **Vault layer** — after identity is established, the user must unlock their vault by submitting a hashed Auth Key to `POST /v1/auth/unlock`. This proves you hold the Vault Key, which is required before the server will accept reads or writes on secrets.
+
+Session auth is handled transparently by the dashboard frontend. If you are building a custom dashboard integration, see [Auth endpoints](/api-reference/auth) for the unlock flow.
+
+## Error reference
+
+| Status | Header / Body | Meaning |
+|---|---|---|
+| `401 Unauthorized` | `{"error": "missing or invalid Authorization header"}` | No `Authorization` header was sent, or the header value does not start with `Bearer `. |
+| `401 Unauthorized` | `{"error": "invalid token format"}` | The token value does not start with `ze_`. |
+| `401 Unauthorized` | `{"error": "invalid token"}` | The token hash was not found in the database — the token does not exist. |
+| `401 Unauthorized` | `{"error": "token has been revoked"}` | The token exists but has been revoked. Create a new one. |
+| `401 Unauthorized` | `{"error": "token has expired"}` | The token's `expires_at` timestamp has passed. Create a new one. |
+| `403 Forbidden` | `{"error": "write permission required"}` | The token has `read` permission, but the request requires `read_write`. |
+| `403 Forbidden` | `{"error": "wrong Vault Key"}` | The submitted Auth Key hash does not match the stored hash (unlock flow only). |
+
+<Note>
+The API uses constant-time comparison when verifying Auth Key hashes during vault unlock, preventing timing attacks.
+</Note>

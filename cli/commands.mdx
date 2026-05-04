@@ -1,0 +1,450 @@
+---
+title: 'zenv CLI command reference'
+description: 'Complete reference for every zenv command group: secrets, run, check, env, tokens, login, whoami, and config with flags and examples.'
+---
+
+The zenv CLI is organized into command groups. Every command that reads or writes secrets requires three things to be configured: an authenticated token, a project vault key (`ZENV_PROJECT_KEY`), and a resolved project and environment. The [configuration reference](/cli/configuration) explains how to set these up.
+
+Global flags are accepted by every command:
+
+| Flag | Description |
+|---|---|
+| `--project` | Override the project name or ID |
+| `--env` | Override the environment (e.g., `development`, `production`) |
+| `-v`, `--verbose` | Enable debug logging to stderr |
+
+---
+
+<Tabs>
+  <Tab title="secrets">
+    ## zenv secrets
+
+    Manage encrypted secrets in the vault. Secret names are always hashed before leaving your machine — the server stores and returns only ciphertext. Decryption happens locally using your project vault key.
+
+    The `secrets` group has an alias: `zenv s`.
+
+    ### secrets set
+
+    Create or update a secret. Encrypts the value locally before sending it to the API. If the secret already exists it is updated in place.
+
+    ```
+    zenv secrets set KEY VALUE
+    ```
+
+    **Example**
+
+    ```bash
+    zenv secrets set DATABASE_URL "postgres://user:pass@host:5432/db"
+    zenv secrets set STRIPE_SECRET_KEY sk_live_abc123
+    ```
+
+    Output is written to stderr so it does not pollute scripts that capture stdout:
+
+    ```
+    created DATABASE_URL
+    ```
+
+    ---
+
+    ### secrets get
+
+    Fetch and decrypt a single secret. Prints the plaintext value to stdout.
+
+    ```
+    zenv secrets get KEY
+    ```
+
+    **Example**
+
+    ```bash
+    zenv secrets get DATABASE_URL
+    # → postgres://user:pass@host:5432/db
+
+    # Use in a script
+    export DATABASE_URL=$(zenv secrets get DATABASE_URL)
+    ```
+
+    ---
+
+    ### secrets list
+
+    List secret metadata for the current project and environment. Because names are hashed on the server, this command shows truncated name hashes, version numbers, and last-updated timestamps — never plaintext names or values.
+
+    ```
+    zenv secrets list
+    # alias: zenv secrets ls
+    ```
+
+    **Example output**
+
+    ```
+    NAME_HASH         VERSION  UPDATED
+    3f8a1c9b2d4e7f...  2        2024-11-14T09:32:01Z
+    a1b2c3d4e5f6a7...  1        2024-11-13T18:00:00Z
+    ```
+
+    ---
+
+    ### secrets delete
+
+    Remove a secret from the vault. The operation is irreversible.
+
+    ```
+    zenv secrets delete KEY
+    # alias: zenv secrets rm
+    ```
+
+    **Example**
+
+    ```bash
+    zenv secrets delete OLD_API_KEY
+    # → deleted OLD_API_KEY
+    ```
+
+    <Warning>
+    Deleting a secret cannot be undone. Any process that depends on the secret at runtime will fail after the next deployment or restart.
+    </Warning>
+  </Tab>
+
+  <Tab title="run">
+    ## zenv run
+
+    Fetch all secrets for the current project and environment, decrypt them locally, and inject them as environment variables into any process. The CLI replaces itself with the target process using `syscall.Exec` — it does not stay running as a parent.
+
+    ```
+    zenv run -- COMMAND [ARGS...]
+    ```
+
+    The `--` separator is required to prevent zenv from parsing your command's flags.
+
+    **Examples**
+
+    ```bash
+    # Start a Node.js server with secrets injected
+    zenv run -- node server.js
+
+    # Run a Python application
+    zenv run -- python app.py
+
+    # Run with a specific environment override
+    zenv run --env staging -- ./bin/migrate
+
+    # Run a shell one-liner
+    zenv run -- sh -c 'echo $DATABASE_URL'
+    ```
+
+    If no secrets are found for the project and environment, the command runs anyway with a warning on stderr:
+
+    ```
+    zenv: no secrets found, running command without injection
+    ```
+
+    If secrets are found, the injection count is reported before exec:
+
+    ```
+    zenv: injected 12 secrets into environment
+    ```
+
+    <Note>
+    `zenv run` merges secrets into the existing shell environment. Secrets are appended — they do not replace variables already set in your shell. If a secret and a shell variable share the same name, the secret value wins because it is appended last.
+    </Note>
+  </Tab>
+
+  <Tab title="check">
+    ## zenv check
+
+    Validate that a set of required secret keys exist in the vault before deployment. Exits with code `0` if all secrets are present, or code `1` if any are missing. Use this in CI pipelines to fail fast.
+
+    ```
+    zenv check KEY [KEY...] [--env ENV]
+    ```
+
+    **Example**
+
+    ```bash
+    zenv check DATABASE_URL STRIPE_KEY JWT_SECRET --env production
+    ```
+
+    **Example output**
+
+    ```
+      ✓ DATABASE_URL
+      ✓ STRIPE_KEY
+      ✗ JWT_SECRET — missing
+
+    zenv check: 1 of 3 secrets missing in my-project/production
+    ```
+
+    The process exits with code `1` when any secrets are missing, making it safe to use as a gate in shell scripts and CI workflows:
+
+    ```bash
+    # In a CI pipeline (GitHub Actions, etc.)
+    zenv check DATABASE_URL STRIPE_KEY JWT_SECRET --env production
+    # Continues only if all three secrets exist
+    ./scripts/deploy.sh
+    ```
+
+    <Tip>
+    Run `zenv check` as the first step in your deployment pipeline, before building images or running migrations. This surfaces missing secrets before they cause a runtime failure in production.
+    </Tip>
+  </Tab>
+
+  <Tab title="env">
+    ## zenv env
+
+    Write decrypted secrets to local `.env` files, or compare secrets across two environments.
+
+    ### env pull
+
+    Fetch all secrets for the current project and environment, decrypt them, and write them to a `.env` file. The file is written with `0600` permissions. The default output path is `.env.local`.
+
+    ```
+    zenv env pull [-o OUTPUT]
+    ```
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `-o`, `--output` | `.env.local` | Output file path. Pass `-` to print to stdout. |
+
+    **Examples**
+
+    ```bash
+    # Write to .env.local (default)
+    zenv env pull
+
+    # Write to a named file
+    zenv env pull -o .env.production
+
+    # Print to stdout (for piping or inspection)
+    zenv env pull -o -
+    ```
+
+    <Warning>
+    `zenv env pull` replaces the entire contents of the output file. Existing entries are overwritten. Add `.env.local` (and any other generated files) to `.gitignore` to avoid accidentally committing decrypted secrets.
+    </Warning>
+
+    ---
+
+    ### env diff
+
+    Compare the set of secrets in two environments within the same project. Output shows which secrets exist only in the first environment, only in the second, or in both. Because names are hashed on the server, the comparison is based on name hashes.
+
+    ```
+    zenv env diff ENV1 ENV2
+    ```
+
+    **Example**
+
+    ```bash
+    zenv env diff development production
+    ```
+
+    **Example output**
+
+    ```
+      = 3f8a1c9b2d4e...  (both)
+      - a1b2c3d4e5f6...  (only in development)
+      + 9c8d7e6f5a4b...  (only in production)
+
+    2 shared, 1 only in development, 1 only in production
+    ```
+  </Tab>
+
+  <Tab title="tokens">
+    ## zenv tokens
+
+    Create and manage scoped service tokens. Service tokens are used by CI systems, deployment tools, and the CLI itself to authenticate with the zenv API. Tokens are scoped to a project and environment and carry either `read` or `read_write` permission.
+
+    ### tokens create
+
+    Create a new service token. The token value is shown exactly once at creation time and cannot be retrieved again.
+
+    ```
+    zenv tokens create --name NAME [--permission PERMISSION] [--expires-at DATETIME]
+    ```
+
+    | Flag | Default | Description |
+    |---|---|---|
+    | `--name` | *(required)* | Human-readable label for the token |
+    | `--permission` | `read` | `read` or `read_write` |
+    | `--expires-at` | none | Optional expiry in RFC3339 format |
+
+    **Examples**
+
+    ```bash
+    # Read-only token for a CI pipeline
+    zenv tokens create --name ci-prod --permission read
+
+    # Read-write token with an expiry
+    zenv tokens create --name deploy-bot --permission read_write --expires-at 2025-12-31T00:00:00Z
+    ```
+
+    **Example output**
+
+    ```
+    Token created successfully.
+
+      Token:       ze_prod_abc123xyz...
+      ID:          tok_01j9k...
+      Name:        ci-prod
+      Environment: production
+      Permission:  read
+
+      This token will never be shown again. Save it now.
+    ```
+
+    <Warning>
+    Copy the token value immediately. It is shown only at creation time and cannot be recovered — you must create a new token if it is lost.
+    </Warning>
+
+    ---
+
+    ### tokens list
+
+    List all active service tokens for the current project.
+
+    ```
+    zenv tokens list
+    # alias: zenv tokens ls
+    ```
+
+    **Example output**
+
+    ```
+    ID          NAME      ENV          PERMISSION  CREATED
+    tok_01j9...  ci-prod   production   read        2024-11-14T09:00:00Z
+    tok_02k8...  deploy    staging      read_write  2024-11-10T14:30:00Z
+    ```
+
+    ---
+
+    ### tokens revoke
+
+    Revoke a service token by its ID. Revocation is immediate — any request using the token is rejected instantly.
+
+    ```
+    zenv tokens revoke TOKEN_ID
+    ```
+
+    **Example**
+
+    ```bash
+    zenv tokens revoke tok_01j9k...
+    # → Token tok_01j9k... revoked.
+    ```
+  </Tab>
+
+  <Tab title="auth">
+    ## zenv login
+
+    Authenticate with zenv by saving a service token to `~/.config/zenv/credentials`. The login flow also attempts to automatically derive and save your project key from your Vault Key, so you do not need to copy it manually.
+
+    ```
+    zenv login
+    ```
+
+    The command is interactive:
+
+    1. Opens a prompt asking you to paste a service token (tokens start with `ze_`).
+    2. Saves the token to `~/.config/zenv/credentials`.
+    3. Prompts for your Vault Key and attempts to derive the project key automatically.
+    4. If auto-derivation succeeds, saves `project_key` and `project` to credentials.
+
+    If Vault Key derivation fails (for example, the token is not project-scoped), you can set the project key manually:
+
+    ```bash
+    zenv config set --global project_key <your-project-key>
+    ```
+
+    ---
+
+    ## zenv whoami
+
+    Show the identity, token, and project scope associated with the current credentials.
+
+    ```
+    zenv whoami
+    ```
+
+    **Example output**
+
+    ```
+    Logged in as Jane Smith <jane@example.com>
+
+    Token:       ci-prod
+    Org:         acme-corp
+    Project:     ecommerce-backend
+    Environment: production
+    Permission:  read
+    Vault Key:   set
+    ```
+
+    If no token is configured, `zenv whoami` prints a message and exits cleanly without an error code.
+  </Tab>
+
+  <Tab title="config">
+    ## zenv config
+
+    Read and write CLI configuration, similar to `git config`. By default, commands target the local `.zenv` file. Pass `--global` to target `~/.config/zenv/` instead.
+
+    Sensitive keys (`token`, `project_key`) are always stored in `~/.config/zenv/credentials` with `0600` permissions, regardless of the `--global` flag.
+
+    ### config set
+
+    ```bash
+    # Write project and env to the local .zenv file
+    zenv config set project ecommerce-backend
+    zenv config set env development
+
+    # Write credentials to the global store
+    zenv config set --global token ze_prod_abc123...
+    zenv config set --global project_key <vault-key>
+
+    # Override the API URL globally
+    zenv config set --global api_url https://api.zenv.sh
+    ```
+
+    ### config get
+
+    ```bash
+    zenv config get project
+    zenv config get --global token
+    ```
+
+    ### config list
+
+    ```bash
+    # Show both global and local config
+    zenv config list
+
+    # Show only global config
+    zenv config list --global
+    ```
+
+    ### config unset
+
+    ```bash
+    zenv config unset env
+    zenv config unset --global token
+    ```
+
+    ### config path
+
+    Print the path to the global config directory (`~/.config/zenv/`):
+
+    ```bash
+    zenv config path
+    ```
+
+    Valid keys for `zenv config`:
+
+    | Key | Scope | Description |
+    |---|---|---|
+    | `api_url` | global / local | API base URL |
+    | `auth_url` | global / local | Auth server URL |
+    | `token` | global (credentials) | Service token |
+    | `project_key` | global (credentials) | Project vault key |
+    | `project` | global / local | Project ID |
+    | `env` | global / local | Environment name |
+  </Tab>
+</Tabs>

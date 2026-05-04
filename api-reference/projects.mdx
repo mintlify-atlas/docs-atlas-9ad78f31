@@ -1,0 +1,217 @@
+---
+title: "Projects API endpoints — manage vault projects"
+description: "Reference for creating projects with cryptographic material, listing and getting projects, and the SDK crypto endpoint that initializes client-side key derivation."
+---
+
+A project is the top-level container for secrets in zEnv. Each project has its own cryptographic identity: a Project Salt, a Project Data Encryption Key (DEK) wrapped with the Project Key Encryption Key (KEK), and a Project Vault Key wrapped per-user so that every authorized team member can decrypt it independently.
+
+All crypto material is generated client-side. The server stores opaque bytes and never participates in key derivation or decryption.
+
+---
+
+## POST /v1/projects — create project
+
+Create a new project. The client generates all crypto material before sending this request.
+
+**Auth:** session + vault unlocked
+
+The request is executed as a database transaction that atomically:
+1. Inserts the project record.
+2. Inserts the project vault key row (salt + wrapped DEK).
+3. Inserts a key grant for the creating user (Project Vault Key wrapped with their public key).
+
+If any step fails, all three are rolled back.
+
+### Request body
+
+<ParamField body="organization_id" type="string" required>
+  UUID of the organization this project belongs to.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Human-readable project name. Must be unique within the organization.
+</ParamField>
+
+<ParamField body="project_salt" type="string" required>
+  Base64-encoded 32-byte salt generated client-side with `amnesia.GenerateSalt()`. Used during key derivation to produce the Project KEK from the Project Vault Key.
+</ParamField>
+
+<ParamField body="wrapped_project_dek" type="string" required>
+  Base64-encoded Project DEK encrypted (wrapped) with the Project KEK using AES-256-GCM. The server stores this blob and returns it to the SDK so the client can unwrap the DEK.
+</ParamField>
+
+<ParamField body="wrapped_project_vault_key" type="string" required>
+  Base64-encoded Project Vault Key wrapped with the creating user's X25519 public key. Stored as a key grant for this user, allowing them to later unwrap the Project Vault Key using their private key.
+</ParamField>
+
+### Response `201 Created`
+
+<ResponseField name="id" type="string">
+  UUID of the newly created project.
+</ResponseField>
+
+<ResponseField name="organization_id" type="string">
+  UUID of the organization.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Project name.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  RFC3339 creation timestamp.
+</ResponseField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.zenv.sh/v1/projects \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=..." \
+  -d '{
+    "organization_id": "019612ab-0000-0000-0000-000000000001",
+    "name": "my-service",
+    "project_salt": "base64encodedSalt==",
+    "wrapped_project_dek": "base64encodedWrappedDEK==",
+    "wrapped_project_vault_key": "base64encodedWrappedVaultKey=="
+  }'
+```
+
+```json response
+{
+  "id": "019612ab-cd34-ef56-ab78-cd901234ef56",
+  "organization_id": "019612ab-0000-0000-0000-000000000001",
+  "name": "my-service",
+  "created_at": "2026-05-04T12:00:00Z"
+}
+```
+
+</CodeGroup>
+
+Returns `409 Conflict` if a project with the same name already exists in the organization.
+
+---
+
+## GET /v1/projects — list projects
+
+List all projects in an organization with pagination, sorting, and search.
+
+**Auth:** session + vault unlocked
+
+### Query parameters
+
+<ParamField query="organization_id" type="string" required>
+  UUID of the organization to list projects for.
+</ParamField>
+
+<ParamField query="page" type="integer">
+  Page number (default: `1`).
+</ParamField>
+
+<ParamField query="per_page" type="integer">
+  Items per page (default: `50`).
+</ParamField>
+
+<ParamField query="sort_by" type="string">
+  Field to sort by. Accepted values: `created_at` (default), `name`.
+</ParamField>
+
+<ParamField query="sort_dir" type="string">
+  Sort direction: `asc` or `desc` (default: `desc`).
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive substring search on project name.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="projects" type="array">
+  <Expandable title="ProjectResponse fields">
+    <ResponseField name="id" type="string">Project UUID.</ResponseField>
+    <ResponseField name="organization_id" type="string">Organization UUID.</ResponseField>
+    <ResponseField name="name" type="string">Project name.</ResponseField>
+    <ResponseField name="created_at" type="string">RFC3339 creation timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="meta" type="object">
+  <Expandable title="Pagination metadata">
+    <ResponseField name="total" type="integer">Total number of matching projects.</ResponseField>
+    <ResponseField name="page" type="integer">Current page number.</ResponseField>
+    <ResponseField name="per_page" type="integer">Items per page.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## GET /v1/projects/:id — get project
+
+Retrieve a single project by UUID.
+
+**Auth:** session + vault unlocked
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  Project UUID.
+</ParamField>
+
+### Response `200 OK`
+
+Returns a single ProjectResponse object.
+
+Returns `404` if the project does not exist.
+
+---
+
+## GET /v1/sdk/projects/:id/crypto — get project crypto material
+
+Returns the project salt and wrapped Project DEK for the SDK. This is the endpoint the SDK calls immediately after authenticating to initialize its cryptographic state.
+
+**Auth:** Bearer token
+
+This endpoint also returns the `vault_key_type` of the token creator's account (`pin` or `passphrase`), which tells the SDK which Argon2id parameters to use during key derivation.
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  Project UUID.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="project_salt" type="string">
+  Base64-encoded 32-byte project salt. The SDK passes this to `DeriveKeys(vaultKey, salt, KeyTypeProject)` to produce the Project KEK and HMAC key.
+</ResponseField>
+
+<ResponseField name="wrapped_project_dek" type="string">
+  Base64-encoded Project DEK wrapped with the Project KEK. The SDK calls `UnwrapKey(ciphertext, nonce, projectKEK)` to recover the raw DEK.
+</ResponseField>
+
+<ResponseField name="vault_key_type" type="string">
+  The token creator's vault key type: `pin` or `passphrase`. Determines which Argon2id parameter set was used during initial key derivation.
+</ResponseField>
+
+<Info>
+The full SDK initialization flow is: fetch vault material (`GET /v1/sdk/vault`) → derive user KEK with Argon2id → unwrap user DEK → fetch project crypto (`GET /v1/sdk/projects/:id/crypto`) → derive Project KEK → unwrap Project DEK. All key material stays in memory on the client; none of it is sent to the server.
+</Info>
+
+<CodeGroup>
+
+```bash curl
+curl https://api.zenv.sh/v1/sdk/projects/019612ab-cd34-ef56-ab78-cd901234ef56/crypto \
+  -H "Authorization: Bearer ze_production_..."
+```
+
+```json response
+{
+  "project_salt": "base64encodedSalt==",
+  "wrapped_project_dek": "base64encodedWrappedDEK==",
+  "vault_key_type": "passphrase"
+}
+```
+
+</CodeGroup>
+
+Returns `404` if no vault key record is found for the project.

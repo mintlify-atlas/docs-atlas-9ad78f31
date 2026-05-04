@@ -1,0 +1,74 @@
+---
+title: "zEnv: Zero-Knowledge Secret Management"
+description: "Learn how zEnv stores secrets with client-side encryption, why the server can never read your data, and what makes it different from Vault or Doppler."
+---
+
+zEnv is a secret manager built on a single guarantee: the server never sees your plaintext data. Unlike Vault, Doppler, or AWS Secrets Manager — where the provider holds keys that can decrypt your secrets — zEnv performs all encryption and decryption on your machine. The server is a ciphertext warehouse. It stores blobs it cannot read.
+
+<Note>
+  zEnv is pre-alpha software. It has not been audited, is not production-deployed, and APIs will break without notice. Do not use it to store secrets you depend on.
+</Note>
+
+## Why zEnv is different
+
+Traditional secret managers trust the provider. The provider encrypts your secrets server-side, holds the decryption keys, and — whether they intend to or not — can read your data. This creates exposure to breaches, subpoenas, rogue employees, and misconfigured access controls.
+
+zEnv takes a different approach. Your Vault Key never leaves your machine. Argon2id derives encryption keys locally. The server receives only ciphertext it cannot interpret. Even with full database access, an attacker sees nothing useful.
+
+<CardGroup cols={2}>
+  <Card title="Amnesia (Go)" icon="shield" href="/security/key-hierarchy">
+    Pure Go cryptographic engine. No network, no storage, no concept of users or projects. Takes bytes in, gives bytes out. The only external dependency is `golang.org/x/crypto`.
+  </Card>
+  <Card title="Amnesia (TypeScript)" icon="code" href="/security/zero-knowledge">
+    Byte-identical TypeScript reimplementation using Web Crypto API and hash-wasm. Cross-language parity is enforced by shared test vectors in CI.
+  </Card>
+  <Card title="CLI" icon="terminal" href="/cli/commands">
+    Single Go binary. No runtime dependency, fast startup. Uses Go Amnesia natively — no WASM overhead. Supports secret injection, `.env` export, and CI validation.
+  </Card>
+  <Card title="SDK" icon="cube" href="/sdk/installation">
+    `@zenv/sdk` for TypeScript. Fetches ciphertext from the API, decrypts locally via Amnesia, and validates the result against your Zod, Valibot, or ArkType schema.
+  </Card>
+</CardGroup>
+
+## The zero-knowledge model
+
+Every secret follows the same path:
+
+1. Your Vault Key (a PIN or passphrase you know) is combined with a per-project salt and run through **Argon2id** once, producing a 64-byte output.
+2. The first 32 bytes become the **Key Encryption Key (KEK)**. The last 32 bytes become the **Auth Key** — a verifier the server can check without learning the Vault Key.
+3. The KEK unwraps the **Data Encryption Key (DEK)**, which was generated randomly when the project was created and is stored server-side only in wrapped (encrypted) form.
+4. The DEK encrypts each secret individually with **AES-256-GCM**. Each secret is its own row in the database — no single-blob vault model.
+
+The server stores the wrapped DEK and the ciphertext. It cannot derive the KEK, cannot unwrap the DEK, and cannot decrypt any secret. This is verifiable: the entire cryptographic story lives in the Amnesia package, which has zero network or storage dependencies and can be audited independently.
+
+## Project structure
+
+```
+zEnv/
+├── amnesia/              Pure Go crypto engine (Argon2id, AES-256-GCM, X25519 NaCl box)
+├── api/                  HTTP API server (Chi) — stores ciphertext, never decrypts
+├── cli/                  CLI tool (Cobra) — client-side crypto via Amnesia
+├── packages/
+│   ├── amnesia/          TypeScript crypto engine — byte-identical to Go Amnesia
+│   └── sdk/              @zenv/sdk — typed API client + schema validation
+└── apps/
+    ├── auth/             Identity server (separate authn layer)
+    ├── web/              TanStack Start dashboard
+    └── docs/             Documentation site
+```
+
+The Go side and TypeScript side share test vectors. Any drift in cryptographic output between the two implementations fails CI immediately.
+
+## Component status
+
+| Component | Status |
+| --- | --- |
+| Amnesia (Go) | Complete — cross-language parity tests passing |
+| Amnesia (TypeScript) | Complete |
+| API server | Complete |
+| CLI | Complete |
+| SDK | Complete |
+| Dashboard | In progress |
+| Security audit | Not done |
+| OAuth | Not done — dev login only |
+| Production deployment | Not done |

@@ -1,0 +1,254 @@
+---
+title: "Service tokens API — create and revoke access tokens"
+description: "Create scoped service tokens for SDK and CLI access, list existing tokens without exposing hashes, and revoke tokens instantly with a single DELETE call."
+---
+
+Service tokens are the primary credential for machine access to the zEnv API. Each token is scoped to a single project, a single environment, and a permission level (`read` or `read_write`). Tokens are SHA-256 hashed before storage — the plaintext is returned exactly once at creation and cannot be retrieved again.
+
+<Warning>
+Store the token value immediately when it is returned. The API stores only a SHA-256 hash of the token. Once the creation response is gone, there is no way to recover the plaintext — you must revoke and recreate.
+</Warning>
+
+---
+
+## POST /v1/tokens — create service token
+
+Generate a new scoped service token for a project. The generated plaintext token is included in the response body and never stored.
+
+**Auth:** session + vault unlocked
+
+The token format is `ze_{environment}_{64-hex-characters}` where the 64 hex characters encode 32 bytes of cryptographically random data.
+
+### Request body
+
+<ParamField body="project_id" type="string" required>
+  UUID of the project this token grants access to.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  A human-readable label for the token. Use descriptive names like `ci-deploy`, `staging-reader`, or `k8s-injector`.
+</ParamField>
+
+<ParamField body="environment" type="string" required>
+  The environment this token is scoped to: `development`, `staging`, or `production`. The token can only access secrets in this environment.
+</ParamField>
+
+<ParamField body="permission" type="string">
+  Permission level: `read` (default) or `read_write`. A `read` token can call GET and bulk-fetch endpoints. A `read_write` token can also call PUT and DELETE on secrets.
+</ParamField>
+
+<ParamField body="expires_at" type="string">
+  Optional expiry timestamp in RFC3339 format (e.g., `2026-12-31T23:59:59Z`). If omitted, the token does not expire.
+</ParamField>
+
+### Response `201 Created`
+
+<ResponseField name="id" type="string">
+  UUID of the token record. Used to identify the token for revocation.
+</ResponseField>
+
+<ResponseField name="token" type="string">
+  Plaintext token value. **Shown exactly once — store this now.**
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Token label, echoed back.
+</ResponseField>
+
+<ResponseField name="project_id" type="string">
+  UUID of the project.
+</ResponseField>
+
+<ResponseField name="environment" type="string">
+  Environment scope.
+</ResponseField>
+
+<ResponseField name="permission" type="string">
+  Permission level: `read` or `read_write`.
+</ResponseField>
+
+<ResponseField name="expires_at" type="string">
+  RFC3339 expiry timestamp. Omitted if the token does not expire.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  RFC3339 creation timestamp.
+</ResponseField>
+
+<CodeGroup>
+
+```bash curl — read_write token
+curl -X POST https://api.zenv.sh/v1/tokens \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=..." \
+  -d '{
+    "project_id": "019612ab-cd34-ef56-ab78-cd901234ef56",
+    "name": "ci-deploy",
+    "environment": "production",
+    "permission": "read_write"
+  }'
+```
+
+```bash curl — read-only with expiry
+curl -X POST https://api.zenv.sh/v1/tokens \
+  -H "Content-Type: application/json" \
+  -H "Cookie: session_id=..." \
+  -d '{
+    "project_id": "019612ab-cd34-ef56-ab78-cd901234ef56",
+    "name": "runtime-reader",
+    "environment": "production",
+    "permission": "read",
+    "expires_at": "2026-12-31T23:59:59Z"
+  }'
+```
+
+```json response
+{
+  "id": "019612ab-0000-0000-0000-000000000099",
+  "token": "ze_production_a3f9b2c8e1d4f6a1b0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4",
+  "name": "ci-deploy",
+  "project_id": "019612ab-cd34-ef56-ab78-cd901234ef56",
+  "environment": "production",
+  "permission": "read_write",
+  "created_at": "2026-05-04T12:00:00Z"
+}
+```
+
+</CodeGroup>
+
+---
+
+## GET /v1/tokens — list service tokens
+
+List all tokens for a project. The response includes token metadata (name, environment, permission, status) but never the token hash or plaintext.
+
+**Auth:** session + vault unlocked
+
+### Query parameters
+
+<ParamField query="project_id" type="string" required>
+  UUID of the project to list tokens for.
+</ParamField>
+
+<ParamField query="environment" type="string">
+  Filter by environment (`development`, `staging`, or `production`).
+</ParamField>
+
+<ParamField query="status" type="string">
+  Filter by token status: `active` (not revoked), `revoked`, or `all` (default).
+</ParamField>
+
+<ParamField query="search" type="string">
+  Case-insensitive substring search on token name.
+</ParamField>
+
+<ParamField query="page" type="integer">
+  Page number (default: `1`).
+</ParamField>
+
+<ParamField query="per_page" type="integer">
+  Items per page (default: `50`).
+</ParamField>
+
+<ParamField query="sort_by" type="string">
+  Field to sort by: `created_at` (default), `name`, `environment`.
+</ParamField>
+
+<ParamField query="sort_dir" type="string">
+  Sort direction: `asc` or `desc` (default: `desc`).
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="tokens" type="array">
+  <Expandable title="TokenListItem fields">
+    <ResponseField name="id" type="string">Token UUID. Use this to revoke the token.</ResponseField>
+    <ResponseField name="name" type="string">Human-readable label.</ResponseField>
+    <ResponseField name="project_id" type="string">Project UUID.</ResponseField>
+    <ResponseField name="environment" type="string">Environment scope.</ResponseField>
+    <ResponseField name="permission" type="string">`read` or `read_write`.</ResponseField>
+    <ResponseField name="expires_at" type="string">RFC3339 expiry timestamp. Omitted if no expiry.</ResponseField>
+    <ResponseField name="revoked_at" type="string">RFC3339 revocation timestamp. Omitted if active.</ResponseField>
+    <ResponseField name="created_at" type="string">RFC3339 creation timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="meta" type="object">
+  Pagination metadata: `total`, `page`, `per_page`.
+</ResponseField>
+
+<CodeGroup>
+
+```bash curl — list active tokens
+curl "https://api.zenv.sh/v1/tokens?project_id=019612ab-cd34-ef56-ab78-cd901234ef56&status=active" \
+  -H "Cookie: session_id=..."
+```
+
+```json response
+{
+  "tokens": [
+    {
+      "id": "019612ab-0000-0000-0000-000000000099",
+      "name": "ci-deploy",
+      "project_id": "019612ab-cd34-ef56-ab78-cd901234ef56",
+      "environment": "production",
+      "permission": "read_write",
+      "created_at": "2026-05-04T12:00:00Z"
+    }
+  ],
+  "meta": {
+    "total": 1,
+    "page": 1,
+    "per_page": 50
+  }
+}
+```
+
+</CodeGroup>
+
+---
+
+## DELETE /v1/tokens/:id — revoke token
+
+Revoke a token immediately. The token's `revoked_at` timestamp is set and the token is rejected on all subsequent requests with `401 Unauthorized`.
+
+**Auth:** session + vault unlocked
+
+Revocation is a soft delete — the token record is retained for audit purposes. Use the `destroy` endpoint for permanent hard deletion.
+
+### Path parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the token to revoke. Obtain this from the list endpoint.
+</ParamField>
+
+### Response `200 OK`
+
+```json
+{ "status": "revoked" }
+```
+
+Returns `404` if the token does not exist or is already revoked.
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE \
+  "https://api.zenv.sh/v1/tokens/019612ab-0000-0000-0000-000000000099" \
+  -H "Cookie: session_id=..."
+```
+
+</CodeGroup>
+
+---
+
+## Token permission reference
+
+| Permission | GET secrets | POST secrets | PUT secrets | DELETE secrets |
+|---|---|---|---|---|
+| `read` | Yes | No | No | No |
+| `read_write` | Yes | Yes | Yes | Yes |
+
+<Tip>
+Prefer `read`-scoped tokens for application runtime (injecting secrets at startup). Reserve `read_write` tokens for CI/CD pipelines and automation that must push or rotate secrets.
+</Tip>

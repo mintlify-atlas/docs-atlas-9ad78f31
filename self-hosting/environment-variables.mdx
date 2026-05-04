@@ -1,0 +1,176 @@
+---
+title: "zEnv API server environment variables"
+description: "Complete reference for every environment variable accepted by the zEnv API server, with defaults, types, and example values."
+---
+
+The zEnv API server is configured exclusively through environment variables — no YAML, TOML, or config files. This follows the [12-factor app](https://12factor.net/config) principle: configuration lives in the environment, not in the codebase. Set variables in your shell, in a `.env` file loaded before the process starts, or as container environment entries in your Compose or orchestration file.
+
+<Info>
+  The API server binary is `./bin/zenv-api` when built from source, or `/usr/local/bin/zenv-api` inside the Docker image. It reads all configuration at startup and exits immediately if required variables are missing or invalid.
+</Info>
+
+## Variables
+
+### `DATABASE_URL`
+
+<Note>
+  **Required.** The server will not start without a valid PostgreSQL connection string.
+</Note>
+
+PostgreSQL connection string. The API uses this for all persistent storage — secrets, projects, tokens, and session data.
+
+| Property | Value |
+|---|---|
+| Required | Yes |
+| Type | String (PostgreSQL DSN) |
+| Default | None |
+
+```bash
+DATABASE_URL="postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable"
+```
+
+In production, point this at a managed Postgres service and use `sslmode=require`:
+
+```bash
+DATABASE_URL="postgres://user:pass@db.example.com:5432/zenv?sslmode=require"
+```
+
+---
+
+### `REDIS_URL`
+
+Redis connection string. Used for session storage and bearer token validation.
+
+| Property | Value |
+|---|---|
+| Required | No |
+| Type | String (Redis URI) |
+| Default | `redis://localhost:6379` |
+
+```bash
+REDIS_URL="redis://localhost:6379/0"
+```
+
+For a password-protected Redis instance (e.g., in production with `docker-compose.prod.yml`):
+
+```bash
+REDIS_URL="redis://:yourpassword@redis:6379/0"
+```
+
+For TLS (e.g., Upstash):
+
+```bash
+REDIS_URL="rediss://:yourpassword@hostname:6380/0"
+```
+
+---
+
+### `PORT`
+
+HTTP listen port for the API server.
+
+| Property | Value |
+|---|---|
+| Required | No |
+| Type | Integer |
+| Default | `8080` |
+
+```bash
+PORT=8080
+```
+
+The Docker image exposes `8080` and the Caddy reverse proxy in `docker-compose.prod.yml` forwards to `api:8080`. Change this only if you have a port conflict.
+
+---
+
+### `VERBOSE`
+
+Enable debug-level request logging. When `true`, every incoming HTTP request is logged with method, path, status code, and latency.
+
+| Property | Value |
+|---|---|
+| Required | No |
+| Type | Boolean |
+| Default | `false` |
+
+```bash
+VERBOSE=true
+```
+
+<Tip>
+  Keep `VERBOSE=false` in production. Request logs can expose metadata about your API usage patterns and add measurable overhead at high traffic volumes.
+</Tip>
+
+---
+
+### `CORS_ORIGINS`
+
+Comma-separated list of allowed CORS origins. Set this to the URL of your dashboard (web app) so that browser clients can call the API.
+
+| Property | Value |
+|---|---|
+| Required | No |
+| Type | String (comma-separated URLs) |
+| Default | None (CORS disabled) |
+
+```bash
+# Development
+CORS_ORIGINS="http://zenv-auth.localhost,http://zenv.localhost"
+
+# Production
+CORS_ORIGINS="https://app.yourdomain.com"
+```
+
+---
+
+### `LOG_LEVEL`
+
+Setting `LOG_LEVEL=debug` is equivalent to setting `VERBOSE=true` — both enable debug-level request logging. The API server reads `LOG_LEVEL` only to check whether it equals `"debug"`; other values (`info`, `warn`, `error`) have no effect beyond disabling verbose mode.
+
+| Property | Value |
+|---|---|
+| Required | No |
+| Type | String |
+| Effective values | `debug` (enables verbose logging) |
+
+```bash
+LOG_LEVEL=debug   # equivalent to VERBOSE=true
+```
+
+---
+
+## Example `.env` file
+
+The following is drawn directly from `api/.env.example` and represents a working local development configuration:
+
+```bash
+DATABASE_URL=postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable
+REDIS_URL=redis://localhost:6379/0
+CORS_ORIGINS=http://zenv-auth.localhost,http://zenv.localhost
+LOG_LEVEL=debug
+```
+
+Load it before running the binary:
+
+```bash
+env $(grep -v '^#' api/.env | xargs) ./bin/zenv-api
+```
+
+Or export each variable manually:
+
+```bash
+export DATABASE_URL="postgres://zenv:zenv_dev@localhost:5434/zenv?sslmode=disable"
+export REDIS_URL="redis://localhost:6379"
+./bin/zenv-api
+```
+
+## Summary table
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `REDIS_URL` | No | `redis://localhost:6379/0` | Redis connection string |
+| `PORT` | No | `8080` | HTTP listen port |
+| `VERBOSE` | No | `false` | Enable debug request logging |
+| `CORS_ORIGINS` | No | — | Allowed CORS origins (comma-separated) |
+| `LOG_LEVEL` | No | — | Set to `debug` to enable verbose logging (alias for `VERBOSE=true`) |

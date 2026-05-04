@@ -1,0 +1,115 @@
+{
+  "projectType": "saas",
+  "projectName": "zEnv",
+  "projectDescription": "A zero-knowledge secret manager where all encryption and decryption happens client-side, so the server never has access to your plaintext secrets.",
+  "theme": "luma",
+  "primaryColor": "#6366f1",
+  "lightColor": "#e0e7ff",
+  "darkColor": "#312e81",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "SDK",
+            "pages": [
+              "sdk/installation",
+              "sdk/configuration",
+              "sdk/methods",
+              "sdk/schema-validation"
+            ]
+          },
+          {
+            "group": "CLI",
+            "pages": [
+              "cli/installation",
+              "cli/commands",
+              "cli/configuration"
+            ]
+          },
+          {
+            "group": "Self-Hosting",
+            "pages": [
+              "self-hosting/overview",
+              "self-hosting/docker",
+              "self-hosting/environment-variables"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/zero-knowledge",
+              "security/key-hierarchy",
+              "security/reporting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api-reference/secrets",
+              "api-reference/projects",
+              "api-reference/tokens",
+              "api-reference/auth"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Zero-knowledge encryption — the server never sees plaintext secrets",
+    "Client-side crypto via the Amnesia engine (Go + TypeScript, byte-identical)",
+    "TypeScript SDK with Standard Schema support (Zod, Valibot, ArkType)",
+    "Go CLI for secrets management and injection into any process",
+    "Service tokens scoped to project, environment, and permission level",
+    "Cross-language cryptographic parity enforced by shared test vectors in CI",
+    "AES-256-GCM symmetric encryption with Argon2id key derivation",
+    "X25519 NaCl box for asymmetric operations"
+  ],
+  "publicApiSurface": [
+    "zenv(config: ZEnvConfig) — create a vault instance",
+    "vault.load() — fetch and decrypt all schema secrets",
+    "vault.get(name) — fetch a single secret",
+    "vault.set(name, value) — encrypt and store a secret",
+    "vault.delete(name) — remove a secret",
+    "vault.select(...names) — bulk fetch specific secrets",
+    "zenv secrets set KEY VALUE",
+    "zenv secrets get KEY",
+    "zenv secrets list",
+    "zenv secrets delete KEY",
+    "zenv run -- <command>",
+    "zenv env pull",
+    "zenv env diff <env1> <env2>",
+    "zenv tokens create --name <name> --permission <perm>",
+    "zenv tokens list",
+    "zenv tokens revoke <id>",
+    "zenv check KEY1 KEY2 --env <env>",
+    "POST /v1/auth/signup",
+    "POST /v1/auth/login",
+    "POST /v1/auth/unlock",
+    "GET /v1/secrets",
+    "POST /v1/sdk/secrets/bulk",
+    "GET /v1/sdk/projects/{id}/crypto"
+  ]
+}

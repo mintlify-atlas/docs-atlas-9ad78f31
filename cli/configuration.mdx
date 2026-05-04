@@ -1,0 +1,167 @@
+---
+title: 'Configure the zenv CLI with env vars and .zenv file'
+description: 'How zenv resolves project context: priority order, the .zenv ini file, all environment variables, and the global config directory at ~/.config/zenv/.'
+---
+
+The zenv CLI never requires you to pass flags on every command. Instead, it resolves the active project, environment, and credentials from a layered set of sources. Understanding this resolution order lets you configure zenv once per project and forget about it.
+
+## Resolution order
+
+When any command runs, zenv resolves each configuration value using the following priority. The first non-empty source wins:
+
+| Priority | Source | Description |
+|---|---|---|
+| 1 | `--project` / `--env` flags | Explicit flags on the command line always win |
+| 2 | `.zenv` file | Project-local ini file, discovered by walking up the directory tree |
+| 3 | Global config files | `~/.config/zenv/config` and `~/.config/zenv/credentials` |
+| 4 | Environment variables | `ZENV_*` variables exported in the shell |
+| 5 | Default | Hardcoded defaults (e.g., `http://localhost:8080` for `api_url`) |
+
+<Info>
+Credentials (`token` and `project_key`) follow a slightly different path. They are never read from the local `.zenv` file in practice — they belong in the global credentials store or in environment variables.
+</Info>
+
+## The .zenv file
+
+The `.zenv` file is an ini-style file that pins a directory tree to a specific project and environment. Place it in the root of your repository alongside your source code.
+
+```ini
+# .zenv
+project=ecommerce-backend
+env=development
+```
+
+The CLI discovers `.zenv` by starting in the current working directory and walking up toward the filesystem root, the same way `git` discovers `.git`. The first `.zenv` file found wins.
+
+You can also set `api_url` or `auth_url` in `.zenv` to point a specific project at a self-hosted zenv instance:
+
+```ini
+project=ecommerce-backend
+env=development
+api_url=https://zenv.internal.example.com
+```
+
+<Tip>
+Commit `.zenv` to your git repository. Every team member who clones the repo automatically gets the correct project and environment configured, with no extra setup step required.
+</Tip>
+
+### Managing .zenv with the CLI
+
+Use `zenv config set` to write to the local `.zenv` file without editing it by hand:
+
+```bash
+zenv config set project ecommerce-backend
+zenv config set env development
+```
+
+Read a value back:
+
+```bash
+zenv config get project
+```
+
+Remove a value:
+
+```bash
+zenv config unset env
+```
+
+## Global config files
+
+User-level configuration lives in `~/.config/zenv/`. Two files are used:
+
+| File | Content |
+|---|---|
+| `~/.config/zenv/config` | `api_url`, `auth_url`, `project`, `env` |
+| `~/.config/zenv/credentials` | `token`, `project_key` (mode `0600`) |
+
+Both files use the same ini format as `.zenv`. The credentials file is written with restrictive permissions (`0600`) so only the owning user can read it.
+
+Use `--global` with `zenv config` to target these files:
+
+```bash
+zenv config set --global token ze_prod_abc123...
+zenv config set --global project_key <your-project-vault-key>
+zenv config set --global api_url https://api.zenv.sh
+```
+
+Print the path to the config directory:
+
+```bash
+zenv config path
+# → /home/you/.config/zenv
+```
+
+## Environment variables
+
+All configuration values can be supplied via environment variables. This is the recommended approach for CI/CD systems where writing files is impractical.
+
+| Variable | Description |
+|---|---|
+| `ZENV_API_URL` | Base URL for the zenv API. Default: `http://localhost:8080` |
+| `ZENV_TOKEN` | Service token used to authenticate with the API. Tokens start with `ze_`. |
+| `ZENV_PROJECT_KEY` | Project vault key used to derive the encryption keys locally. Never sent to the server. |
+| `ZENV_PROJECT` | Project ID or name to operate on. |
+| `ZENV_ENV` | Environment name, e.g. `development`, `staging`, `production`. |
+
+**Example: CI environment setup**
+
+```bash
+export ZENV_API_URL=https://api.zenv.sh
+export ZENV_TOKEN=ze_prod_abc123xyz...
+export ZENV_PROJECT_KEY=zvk_...
+export ZENV_PROJECT=ecommerce-backend
+export ZENV_ENV=production
+
+zenv check DATABASE_URL STRIPE_KEY JWT_SECRET
+zenv run -- ./scripts/deploy.sh
+```
+
+In GitHub Actions, store these as repository secrets and inject them as environment variables in your workflow:
+
+```yaml
+- name: Deploy
+  env:
+    ZENV_TOKEN: ${{ secrets.ZENV_TOKEN }}
+    ZENV_PROJECT_KEY: ${{ secrets.ZENV_PROJECT_KEY }}
+    ZENV_PROJECT: ecommerce-backend
+    ZENV_ENV: production
+  run: |
+    zenv check DATABASE_URL STRIPE_KEY
+    zenv run -- ./scripts/deploy.sh
+```
+
+<Warning>
+`ZENV_TOKEN` and `ZENV_PROJECT_KEY` are sensitive credentials. Never commit them to source control or print them in CI logs. Use your CI platform's secret management to inject them.
+</Warning>
+
+## Flags
+
+Two global flags override any configured value for a single command invocation:
+
+```bash
+# Run against a different project without changing config
+zenv --project other-project secrets list
+
+# Run against a different environment for one command
+zenv --env production secrets list
+```
+
+Flags take priority over everything else, making them useful for one-off cross-project or cross-environment operations without modifying your local `.zenv` file.
+
+## How project keys work
+
+`ZENV_PROJECT_KEY` (also stored as `project_key` in the credentials file) is the project vault key. It is used exclusively on the client side to derive the encryption keys that protect your secrets. The server never receives it.
+
+When you run a command that reads or writes secrets, the CLI:
+
+1. Fetches the project's cryptographic material from the API (`project_salt` + `wrapped_project_dek`).
+2. Runs Argon2id on `ZENV_PROJECT_KEY + project_salt` to derive the Project KEK.
+3. Unwraps the Project DEK using the KEK with AES-256-GCM.
+4. Uses the Project DEK for all local encrypt/decrypt operations.
+
+`zenv login` can derive and save the project key automatically from your Vault Key. If you prefer to set it manually, obtain the key from the zenv dashboard and run:
+
+```bash
+zenv config set --global project_key <your-project-key>
+```

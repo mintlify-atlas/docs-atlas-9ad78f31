@@ -1,0 +1,92 @@
+---
+title: "Self-hosting zEnv: architecture overview"
+description: "Learn what services you need to run zEnv locally — Go API server, PostgreSQL 17, Redis 7, and the separate auth identity layer."
+---
+
+Self-hosting zEnv means running the full server stack on your own infrastructure. The system is split across four cooperating services: the Go HTTP API, a PostgreSQL database, a Redis session store, and a TypeScript-based auth server that acts as a separate identity layer. All encryption and decryption remains client-side; the server only ever stores and retrieves ciphertext.
+
+<Warning>
+  Production deployment is **not yet complete**. `docker-compose.prod.yml` exists but OAuth, security audits, and stability guarantees are all unfinished. Self-hosting today is for **local development and experimentation only**. Do not use this to store secrets you care about.
+</Warning>
+
+## Components
+
+<CardGroup cols={2}>
+  <Card title="API server" icon="server">
+    Written in Go, built with the [Chi](https://github.com/go-chi/chi) router. Handles all secret storage and retrieval — it never decrypts any user data. Listens on port `8080` by default.
+  </Card>
+  <Card title="PostgreSQL 17" icon="database">
+    Primary datastore. Each secret occupies its own encrypted row. Dev setup exposes Postgres on host port `5434` to avoid conflicts with local Postgres installations.
+  </Card>
+  <Card title="Redis 7" icon="bolt">
+    Used for session storage and token validation. Dev setup exposes Redis on port `6379`. In production this can be replaced with a managed service such as Upstash.
+  </Card>
+  <Card title="Auth server" icon="lock">
+    A separate TypeScript service (`apps/auth/`) built on Better Auth. It handles user sign-in and issues session cookies consumed by the API. OAuth providers are not yet wired; only dev email login is functional.
+  </Card>
+</CardGroup>
+
+## Repository layout
+
+The backend lives in a Go workspace (`go.work`) containing three modules:
+
+```
+amnesia/    Pure crypto engine — Argon2id, AES-256-GCM, X25519 NaCl box
+api/        HTTP API server — stores and retrieves ciphertext, never decrypts
+cli/        CLI tool — uses Amnesia for all client-side crypto
+```
+
+The TypeScript services are managed as a pnpm workspace:
+
+```
+apps/auth/  Identity layer — authn for both API and dashboard
+apps/web/   TanStack Start dashboard (in progress)
+packages/   amnesia (TS crypto engine) and @zenv/sdk
+```
+
+## Build and run with Make
+
+The `Makefile` at the repository root provides targets for all common operations:
+
+| Target | Description |
+|---|---|
+| `make dev-up` | Start Postgres 17 and Redis 7 via Docker Compose |
+| `make dev-down` | Stop and remove containers and volumes |
+| `make migrate` | Apply database migrations using `golang-migrate` |
+| `make build` | Compile `bin/zenv-api` and `bin/zenv` |
+| `make test` | Run all Go tests across all modules |
+| `make test-amnesia` | Run crypto unit tests with known-answer test vectors |
+| `make lint` | Run `golangci-lint` |
+| `make swagger` | Regenerate OpenAPI spec from `swag` annotations |
+| `make sdk-types` | Regenerate TypeScript types from OpenAPI spec |
+| `make smoke` | Run smoke tests against a live API instance |
+
+## Zero-knowledge invariant
+
+The server never holds a plaintext secret. The key hierarchy ensures this:
+
+```
+Vault Key (user's passphrase or PIN)
+  │
+  ▼ Argon2id — one run, 64-byte output
+  ┌────────────────────────────────────┐
+  │ bytes 0-31        bytes 32-63      │
+  │ KEK (wraps DEK)   Auth Key         │
+  └────────────────────────────────────┘
+        │
+        ▼ AES-256-GCM unwrap (client-side)
+      DEK — encrypts each secret row individually
+```
+
+The server stores only the wrapped DEK and per-row ciphertext. It cannot derive the KEK, unwrap the DEK, or decrypt any vault item.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Run with Docker Compose" icon="docker" href="/self-hosting/docker">
+    Step-by-step local setup using Make targets and the development Compose file.
+  </Card>
+  <Card title="Environment variables" icon="sliders" href="/self-hosting/environment-variables">
+    All configuration options for the API server, with defaults and example values.
+  </Card>
+</CardGroup>
